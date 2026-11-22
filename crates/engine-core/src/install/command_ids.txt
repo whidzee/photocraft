@@ -41,6 +41,7 @@ image.imageRotation.90cw
 image.imageRotation.90ccw
 image.adjustments.desaturate
 paint.stroke
+paint.projectedStroke
 tools.setColors
 tools.swapColors
 tools.defaultColors

@@ -797,6 +797,8 @@ fn pct(p: &Value, k: &str, d: f32) -> f32 {
 }
 
 pub mod mixer_live;
+pub(crate) mod projected;
+pub use projected::{PreviewOverlay, ProjectedPreview, paint_projected_stroke};
 fn mixer_brush(s: &mut Session, p: &Value) -> Result<Value> {
     mixer_live::run(s, p)
 }

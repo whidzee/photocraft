@@ -2,9 +2,9 @@ pub(super) const CANVAS_WGSL: &str = r#"
 struct View {
     a: vec4<f32>, // screen_w, screen_h, scale (device px per doc px), pixels_per_point
     b: vec4<f32>, // doc origin x, y (device px), doc w, h (doc px)
-    c: vec4<f32>, // filter mode, lod, unused, unused
-    d: vec4<f32>, // unused, unused, display (0 none, 1 LUT, 2 LUT + gamut, 3 matrix/shaper), output linear
-    e: vec4<f32>, // unused rgb, gamut warning opacity
+    c: vec4<f32>, // filter mode, lod, 360° View (1 on), unused
+    d: vec4<f32>, // 360° View centre x, y (device px), display (0 none, 1 LUT, 2 LUT + gamut, 3 matrix/shaper), output linear
+    e: vec4<f32>, // 360° View yaw, pitch (radians), view-plane units per device px; gamut warning opacity
     f: vec4<f32>, // unused rgb, 32-bit preview gain (2^exposure; 0 = off)
     g: vec4<f32>, // gamut warning rgb, 32-bit preview 1 / gamma
     h: vec4<f32>, // cos, sin, center_doc_x, center_doc_y
@@ -124,6 +124,16 @@ fn fs_tile(in: VOut) -> @location(0) vec4<f32> {
         let f = clamp((tt - i - 0.5) * (scale / per) + 0.5, vec2(0.0), vec2(1.0));
         col = textureSampleLevel(tex, samp, (i + 0.5 + f) / texels, 0.0);
     }
+    col = shade(col);
+    // Document pixels only, premultiplied: the canvas draws the checkerboard under them and the pixel grid over them.
+    if (col.a <= 0.0) { discard; }
+    return col;
+}
+
+// The 32-bit preview, the display transform and the output encoding of a sampled document colour `col_in`
+// (premultiplied, as the texture stores it).
+fn shade(col_in: vec4<f32>) -> vec4<f32> {
+    var col = col_in;
     if (view.f.w > 0.0 && col.a > 0.0) {
         // View › 32-bit Preview Options: exposure and gamma in linear light on the sRGB-encoded
         // texture value, before the display LUT. A float canvas keeps values above 1.0, so they
@@ -146,13 +156,65 @@ fn fs_tile(in: VOut) -> @location(0) vec4<f32> {
         }
         col = vec4(shown * col.a, col.a);
     }
-    // Document pixels only, premultiplied: the canvas draws the checkerboard under them and the pixel grid over them.
-    if (col.a <= 0.0) { discard; }
     var rgb = col.rgb;
-    if (view.d.w > 0.5) {
+    if (view.d.w > 0.5 && col.a > 0.0) {
         rgb = srgb_to_linear(rgb / col.a) * col.a;
     }
     return vec4(rgb, col.a);
+}
+
+// --- 360° View -----------------------------------------------------------------------------
+
+@vertex
+fn vs_proj(@builtin(vertex_index) vi: u32) -> VOut {
+    // The whole screen; the scissor keeps each tile's draw to where it can show.
+    let c = corner(vi) * 2.0 - 1.0;
+    return VOut(vec4(c.x, c.y, 0.0, 1.0));
+}
+
+const PI: f32 = 3.14159265358979;
+
+// The mip level of one device pixel's footprint at view-plane offset (dx, dy) and latitude `lat` of a `size`
+// document. A pixel off the optical axis covers less of the sphere, by 1 / sqrt(1 + r^2) across; near the poles the
+// rows stretch sideways, which only counts within about 2 degrees of them. Half a level sharp.
+fn proj_lod(k: f32, dx: f32, dy: f32, lat: f32, size: vec2<f32>) -> f32 {
+    let ang = k / sqrt(1.0 + dx * dx + dy * dy);
+    let along_lon = ang * size.y / PI;
+    let c = max(cos(lat), 0.0005);
+    let along_lat = ang * size.x / (2.0 * PI) / c;
+    let near_pole = 1.0 - smoothstep(0.0, 0.035, c);
+    let fp = max(along_lon, mix(along_lon, along_lat * 0.25, near_pole));
+    return max(log2(max(fp, 1e-6)) - 0.5, 0.0);
+}
+
+// The document as a latlong panorama seen from the centre of the sphere (photocraft_engine::equirect: the view
+// pixel's direction, then its longitude and latitude).
+@fragment
+fn fs_proj(in: VOut) -> @location(0) vec4<f32> {
+    let k = view.e.z;
+    let dx = (in.pos.x - view.d.x) * k;
+    let dy = -(in.pos.y - view.d.y) * k;
+    let sy = sin(view.e.x);
+    let cy = cos(view.e.x);
+    let sp = sin(view.e.y);
+    let cp = cos(view.e.y);
+    let f = vec3(cp * sy, sp, cp * cy);
+    let r = vec3(cy, 0.0, -sy);
+    let u = vec3(-sp * sy, cp, -sp * cy);
+    let dir = normalize(f + dx * r + dy * u);
+    let lon = atan2(dir.x, dir.z);
+    let lat = asin(clamp(dir.y, -1.0, 1.0));
+    let size = view.b.zw;
+    var d = vec2((lon / (2.0 * PI) + 0.5) * size.x, (0.5 - lat / PI) * size.y);
+    d.x = d.x - floor(d.x / size.x) * size.x;
+    d.y = clamp(d.y, 0.0, size.y - 0.001);
+    let t = d - tile.r.xy;
+    // Each tile's draw covers its share of the view: only the directions that land in the tile are its own.
+    if (any(t < vec2(0.0)) || any(t >= tile.r.zw) || any(d < tile.core.xy) || any(d >= tile.core.zw)) { discard; }
+    var col = textureSampleLevel(tex, samp, t / tile.r.zw, proj_lod(k, dx, dy, lat, size));
+    col = shade(col);
+    if (col.a <= 0.0) { discard; }
+    return col;
 }
 "#;
 

@@ -3,7 +3,18 @@ use craft::behavior::kurbo::Point;
 use egui::{Rect, pos2};
 
 fn picture(shows: Shows, k: u32, growth: [f32; 2]) -> GpuPicture {
-    let params = ViewParams { doc: 1, doc_size: [400, 300], zoom: 1.0, center: [0.0, 0.0], rotation: 0.0, view_key: 9, display: 0, output: 0, hdr: None };
+    let params = ViewParams {
+        doc: 1,
+        doc_size: [400, 300],
+        zoom: 1.0,
+        center: [0.0, 0.0],
+        rotation: 0.0,
+        view_key: 9,
+        display: 0,
+        output: 0,
+        hdr: None,
+        projection: None,
+    };
     GpuPicture { params, shows, k, growth, bounds: DRect::new(0, 0, 400, 300) }
 }
 

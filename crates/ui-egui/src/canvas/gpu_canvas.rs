@@ -44,6 +44,7 @@ mod residency;
 mod resources;
 mod setup;
 mod shaders;
+mod sphere;
 mod texels;
 
 #[cfg(all(test, windows))]
@@ -129,6 +130,10 @@ pub struct ViewParams {
     /// before the display LUT; `None` when off. The display LUT must then leave it out
     /// (`ColorState::gpu_canvas_lut`).
     pub hdr: Option<[f32; 2]>,
+    /// View › 360° View: the document is a latlong panorama seen from the centre of its sphere, through a camera
+    /// `[yaw, pitch, vertical field of view]` in degrees (`canvas::view360`). `zoom`, `center` and `rotation` are
+    /// then unused. `None` for the flat view.
+    pub projection: Option<[f32; 3]>,
 }
 
 /// When high-bit documents get an `Rgba16Float` canvas texture.

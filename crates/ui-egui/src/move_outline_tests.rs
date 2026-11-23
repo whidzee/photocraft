@@ -47,6 +47,7 @@ fn app() -> (Box<PhotocraftApp>, LayerId, LayerId) {
         zoom_animating: false,
         zoom_anchor: None,
         zoom_from: None,
+        projection: None,
     }];
     (app, ids[0], ids[1])
 }

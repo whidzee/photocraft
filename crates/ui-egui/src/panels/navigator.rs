@@ -19,6 +19,11 @@ pub(super) fn navigator(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         let _ = Notice::new(Tone::Neutral, tl!("No document")).layout(NoticeLayout::Centred).show(ui);
         return;
     };
+    // View › 360° View outlines what the view sees on the flat image.
+    if crate::canvas::view360::is_on(app, idx) {
+        crate::canvas::view360::navigator(app, ui, idx);
+        return;
+    }
     // The canvas as its last pass showed it, the eased camera of an Animated Zoom included.
     let Some(mut view) = document_display::active_view(app) else { return };
     let size = app.session.documents()[idx].doc.size;

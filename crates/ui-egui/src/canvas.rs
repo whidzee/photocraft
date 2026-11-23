@@ -66,6 +66,7 @@ pub(super) mod tile_overlay;
 pub mod tool_feedback;
 pub(crate) mod tools;
 mod transform_controls;
+pub(crate) mod view360;
 pub(crate) mod viewport_pages;
 
 pub(crate) use cursor_policy::alt_samples;
@@ -162,7 +163,8 @@ fn sync_view_to_document(app: &PhotocraftApp, view: &mut View, doc: &Document) -
 
 /// Draws one document's canvas into `rect` and runs its tools. `host` names the canvas (document, viewport and document
 /// window); `primary` is the main window's, where the tools are active. Returns the view after the pass and the
-/// canvas's output, whose press the caller reads (a press activates its document).
+/// canvas's output, whose press the caller reads (a press activates its document); a 360° View has none, and activates
+/// its document itself.
 pub fn canvas_view(
     app: &mut PhotocraftApp,
     ui: &mut egui::Ui,
@@ -170,7 +172,7 @@ pub fn canvas_view(
     rect: Rect,
     mut view: View,
     primary: bool,
-) -> (View, craft::ui::canvas::CanvasOutput) {
+) -> (View, Option<craft::ui::canvas::CanvasOutput>) {
     let ctx = ui.ctx().clone();
     let idx = host.idx;
     // The primary canvas keeps its view in `app.ui.views`: the pass starts from the stored view and stores the one it
@@ -196,6 +198,16 @@ pub fn canvas_view(
     }
     let doc = app.session.documents()[idx].doc.clone();
     let aspect = sync_view_to_document(app, &mut view, &doc);
+    // View › 360° View draws and takes input on its own.
+    if view.projection.is_some() {
+        let view = view360::show(app, ui, host, rect, view, output);
+        // The primary canvas's camera is the document's own: the next pass starts from it.
+        if let Some(stored) = (primary && !own_window).then(|| app.ui.views.get_mut(idx)).flatten() {
+            stored.projection = view.projection;
+            stored.pending.clone_from(&view.pending);
+        }
+        return (view, None);
+    }
     let active = primary && app.session.active_index() == Some(idx);
     if active {
         // A document switched while a button is down ends the gesture of the document it began on.
@@ -227,7 +239,7 @@ pub fn canvas_view(
         next.pending.extend_from_slice(asked);
         app.ui.views[idx] = next;
     }
-    (view, shown.output)
+    (view, Some(shown.output))
 }
 
 #[cfg(test)]

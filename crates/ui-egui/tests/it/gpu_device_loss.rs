@@ -418,6 +418,7 @@ mod gpu_tests {
                     display: 0,
                     output: 0,
                     hdr: None,
+                    projection: None,
                 },
             }
         });

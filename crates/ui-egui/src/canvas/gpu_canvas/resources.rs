@@ -8,6 +8,8 @@ pub(super) struct Resources {
     pub(super) view_bgl: wgpu::BindGroupLayout,
     pub(super) tile_bgl: wgpu::BindGroupLayout,
     pub(super) tile_pipeline: wgpu::RenderPipeline,
+    /// View › 360° View: the document as a latlong panorama seen from inside its sphere (`fs_proj`).
+    pub(super) proj_pipeline: wgpu::RenderPipeline,
     pub(super) sampler: wgpu::Sampler,
     pub(super) mip_bgl: wgpu::BindGroupLayout,
     mip_pipeline: wgpu::RenderPipeline,
@@ -290,6 +292,7 @@ impl Resources {
             },
         };
         let tile_pipeline = pipeline(device, "pc_canvas_tile", &layout, &module, ("vs_tile", "fs_tile"), target, Some(blend));
+        let proj_pipeline = pipeline(device, "pc_canvas_proj", &layout, &module, ("vs_proj", "fs_proj"), target, Some(blend));
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("pc_canvas_trilinear"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -345,6 +348,7 @@ impl Resources {
             view_bgl,
             tile_bgl,
             tile_pipeline,
+            proj_pipeline,
             sampler,
             mip_bgl,
             mip_pipeline,

@@ -55,6 +55,12 @@ pub(super) fn tile_screen_aabb(origin: [f32; 2], scale: f32, center: [f32; 2], c
 }
 
 impl CanvasCallback {
+    /// The 360° View camera (yaw, pitch, field of view in degrees), `None` for the flat view or a camera that isn't
+    /// finite.
+    fn look(&self) -> Option<[f32; 3]> {
+        self.params.projection.filter(|look| look.iter().all(|v| v.is_finite()))
+    }
+
     /// Screen-pixel origin of document (0, 0) (snapped to whole pixels) and device px per doc px.
     fn placement(&self, ppp: f32) -> ([f32; 2], f32) {
         let p = &self.params;
@@ -75,6 +81,16 @@ impl CanvasCallback {
             Some([e, gm]) if e.is_finite() && gm.is_finite() && gm > 0.0 => (2f32.powf(e.clamp(-20.0, 20.0)), 1.0 / gm.max(0.01)),
             _ => (0.0, 1.0),
         };
+        // 360° View: on, the view's centre in device pixels, yaw and pitch in radians and view-plane units per device
+        // pixel (`fs_proj`).
+        let [on, cx, cy, yaw, pitch, k] = match self.look() {
+            Some([yaw, pitch, fov]) => {
+                let h = (self.rect.height() * ppp).max(1.0);
+                let c = self.rect.center();
+                [1.0, c.x * ppp, c.y * ppp, yaw.to_radians(), pitch.to_radians(), (fov.to_radians() / 2.0).tan() / (h / 2.0)]
+            }
+            None => [0.0; 6],
+        };
         [
             screen[0] as f32,
             screen[1] as f32,
@@ -86,15 +102,15 @@ impl CanvasCallback {
             p.doc_size[1] as f32,
             mode,
             lod,
+            on,
             0.0,
-            0.0,
-            0.0,
-            0.0,
+            cx,
+            cy,
             p.display as f32,
             if out_linear { 1.0 } else { 0.0 },
-            0.0,
-            0.0,
-            0.0,
+            yaw,
+            pitch,
+            k,
             style.gamut_opacity,
             0.0,
             0.0,
@@ -177,9 +193,30 @@ impl CallbackTrait for CanvasCallback {
         if doc.size != self.params.doc_size {
             return;
         }
-        let (origin, scale) = self.placement(info.pixels_per_point);
         let (cx0, cy0) = (clip.left_px as f32, clip.top_px as f32);
         let (cx1, cy1) = (cx0 + clip.width_px as f32, cy0 + clip.height_px as f32);
+        if let Some(look) = self.look() {
+            // Every tile's draw covers the screen and keeps the directions that land in it, scissored to the part of
+            // the view the tile can reach.
+            pass.set_pipeline(&res.proj_pipeline);
+            pass.set_bind_group(2, res.luts.get(&(self.params.doc, self.params.output)).unwrap_or(&res.identity_lut), &[]);
+            let ppp = info.pixels_per_point;
+            let view = [self.rect.min.x * ppp, self.rect.min.y * ppp, self.rect.max.x * ppp, self.rect.max.y * ppp];
+            let rects: Vec<[u32; 4]> = doc.tiles.iter().map(|t| t.rect).collect();
+            for (t, b) in doc.tiles.iter().zip(super::sphere::tile_boxes(look, view, self.params.doc_size, &rects)) {
+                let Some([x0, y0, x1, y1]) = b else { continue };
+                let (x0, y0) = (x0.floor().max(cx0), y0.floor().max(cy0));
+                let (x1, y1) = (x1.ceil().min(cx1).min(sw as f32), y1.ceil().min(cy1).min(sh as f32));
+                if x1 <= x0 || y1 <= y0 {
+                    continue;
+                }
+                pass.set_scissor_rect(x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32);
+                pass.set_bind_group(1, &t.bind_group, &[0]);
+                pass.draw(0..6, 0..1);
+            }
+            return;
+        }
+        let (origin, scale) = self.placement(info.pixels_per_point);
         let rot = if self.params.rotation.is_finite() { self.params.rotation } else { 0.0 };
         let (cos, sin) = if rot.abs() < 1e-8 { (1.0, 0.0) } else { (rot.cos(), rot.sin()) };
         let cen = self.params.center;

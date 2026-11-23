@@ -191,7 +191,7 @@ fn document(app: &mut PhotocraftApp, ui: &mut egui::Ui, rect: Rect) {
     // While the active document floats, a press on the main canvas activates the document it shows: the canvas
     // output reports the press, the app activates (as `SplitViews` reports `activated`).
     let (_, output) = canvas_view(app, ui, CanvasHost::main(idx), rect, view, primary);
-    if idx != active && matches!(output.press.phase, PressPhase::Down { .. }) {
+    if idx != active && output.is_some_and(|output| matches!(output.press.phase, PressPhase::Down { .. })) {
         app.session.set_active(idx);
     }
 }

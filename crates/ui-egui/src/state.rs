@@ -87,6 +87,10 @@ pub struct View {
     /// The zoom and centre of the view when the discrete zoom above was asked for: the ease starts there.
     #[serde(skip)]
     pub(crate) zoom_from: Option<(f32, [f32; 2])>,
+    /// View › 360° View: the camera this view looks through when it shows its latlong document from inside the sphere
+    /// (`canvas::view360`); `None` for the flat view.
+    #[serde(default)]
+    pub projection: Option<crate::canvas::view360::SphereView>,
 }
 
 impl View {
@@ -137,6 +141,7 @@ impl Default for View {
             zoom_animating: false,
             zoom_anchor: None,
             zoom_from: None,
+            projection: None,
         }
     }
 }

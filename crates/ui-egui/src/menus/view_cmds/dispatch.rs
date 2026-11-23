@@ -61,7 +61,13 @@ pub fn handles(id: &str) -> bool {
         || is_context_task_bar(id)
         || matches!(
             id,
-            "view.extras" | "view.flipHorizontal" | "view.pixelAspectRatioCorrection" | "view.patternPreview" | "view.pixelArtPreview" | "view.rotateView"
+            "view.extras"
+                | "view.flipHorizontal"
+                | "view.pixelAspectRatioCorrection"
+                | "view.patternPreview"
+                | "view.pixelArtPreview"
+                | "view.rotateView"
+                | "view.view360"
         )
 }
 
@@ -81,7 +87,7 @@ pub(super) fn is_enabled_with_engine(app: &PhotocraftApp, id: &str, engine_enabl
         // Standard again before the next pass (`leave_full_screen_without_document`).
         "view.screenMode.cycle" | "view.screenMode.cycleBack" => app.ui.text_edit.is_none() && doc,
         "view.screenMode.fullScreen" | "view.screenMode.fullScreenWithMenuBar" => doc,
-        "view.rotateView" => doc,
+        "view.rotateView" | "view.view360" => doc,
         i if i.starts_with("window.arrange.") => arrange_command(&i["window.arrange.".len()..]).is_some_and(|command| {
             let windows = &app.ui.document_windows;
             command.arrangement().enabled(app.session.documents().len(), windows.docked.len(), windows.floating.len())
@@ -154,6 +160,7 @@ pub fn checked(app: &PhotocraftApp, id: &str) -> Option<bool> {
         "view.pixelAspectRatioCorrection" => o.pixel_aspect_correction,
         "view.patternPreview" => o.pattern_preview,
         "view.pixelArtPreview" => o.pixel_art_preview,
+        "view.view360" => app.session.active_index().is_some_and(|idx| crate::canvas::view360::is_on(app, idx)),
         _ => return None,
     })
 }
@@ -289,6 +296,9 @@ fn flag_param(p: &Value, cur: bool) -> bool {
 fn run(app: &mut PhotocraftApp, id: &str, p: &Value) -> Result<Value, String> {
     if id == "view.rotateView" {
         return rotate_command(app, p);
+    }
+    if id == crate::canvas::view360::COMMAND {
+        return crate::canvas::view360::command(app, p);
     }
     // One store: the font picker reads the same preference.
     if let Some(k) = id.strip_prefix("type.fontPreviewSize.") {

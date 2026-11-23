@@ -2,10 +2,10 @@ pub(super) const CANVAS_WGSL: &str = r#"
 struct View {
     a: vec4<f32>, // screen_w, screen_h, scale (device px per doc px), pixels_per_point
     b: vec4<f32>, // doc origin x, y (device px), doc w, h (doc px)
-    c: vec4<f32>, // filter mode, lod, 360° View (1 on), unused
+    c: vec4<f32>, // filter mode, lod, 360° View (1 on), 360° View turn quaternion w
     d: vec4<f32>, // 360° View centre x, y (device px), display (0 none, 1 LUT, 2 LUT + gamut, 3 matrix/shaper), output linear
     e: vec4<f32>, // 360° View yaw, pitch (radians), view-plane units per device px; gamut warning opacity
-    f: vec4<f32>, // unused rgb, 32-bit preview gain (2^exposure; 0 = off)
+    f: vec4<f32>, // 360° View turn quaternion xyz, 32-bit preview gain (2^exposure; 0 = off)
     g: vec4<f32>, // gamut warning rgb, 32-bit preview 1 / gamma
     h: vec4<f32>, // cos, sin, center_doc_x, center_doc_y
 };
@@ -201,7 +201,10 @@ fn fs_proj(in: VOut) -> @location(0) vec4<f32> {
     let f = vec3(cp * sy, sp, cp * cy);
     let r = vec3(cy, 0.0, -sy);
     let u = vec3(-sp * sy, cp, -sp * cy);
-    let dir = normalize(f + dx * r + dy * u);
+    var dir = normalize(f + dx * r + dy * u);
+    // Image › Rotate Panorama's preview: the content this direction will show once applied.
+    let q = view.f.xyz;
+    dir = dir + 2.0 * cross(q, cross(q, dir) + view.c.w * dir);
     let lon = atan2(dir.x, dir.z);
     let lat = asin(clamp(dir.y, -1.0, 1.0));
     let size = view.b.zw;

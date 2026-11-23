@@ -91,6 +91,7 @@ impl CanvasCallback {
             }
             None => [0.0; 6],
         };
+        let [tx, ty, tz, tw] = self.params.sphere_turn.filter(|q| q.iter().all(|v| v.is_finite())).unwrap_or([0.0, 0.0, 0.0, 1.0]);
         [
             screen[0] as f32,
             screen[1] as f32,
@@ -103,7 +104,7 @@ impl CanvasCallback {
             mode,
             lod,
             on,
-            0.0,
+            tw,
             cx,
             cy,
             p.display as f32,
@@ -112,9 +113,9 @@ impl CanvasCallback {
             pitch,
             k,
             style.gamut_opacity,
-            0.0,
-            0.0,
-            0.0,
+            tx,
+            ty,
+            tz,
             gain,
             g[0],
             g[1],

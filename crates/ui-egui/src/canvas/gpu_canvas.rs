@@ -134,6 +134,9 @@ pub struct ViewParams {
     /// `[yaw, pitch, vertical field of view]` in degrees (`canvas::view360`). `zoom`, `center` and `rotation` are
     /// then unused. `None` for the flat view.
     pub projection: Option<[f32; 3]>,
+    /// With `projection`: each view direction shows the content of this rotation of it (a unit quaternion `x, y, z,
+    /// w`), for Image › Rotate Panorama's preview. `None` shows the document as it is.
+    pub sphere_turn: Option<[f32; 4]>,
 }
 
 /// When high-bit documents get an `Rgba16Float` canvas texture.

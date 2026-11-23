@@ -438,6 +438,7 @@ pub(crate) const TAKERS: &[fn(&mut PhotocraftApp, &egui::Context)] = &[
     discard_ui::take,
     open_prompt::take,
     credits::take,
+    rotate_panorama::take,
     adjust_dialog::take,
     layer_style::take,
     color_picker_ui::take,
@@ -753,6 +754,7 @@ pub mod rasterize_prompt;
 #[cfg(test)]
 mod rotate_canvas_layout_tests;
 pub(crate) mod rotate_canvas_ui;
+pub(crate) mod rotate_panorama;
 #[cfg(test)]
 mod scale_effects_layout_tests;
 pub mod screen_picker;

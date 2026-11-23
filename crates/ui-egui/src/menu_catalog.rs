@@ -224,6 +224,8 @@ pub static CATALOG: &[(&[&str], &str, Option<&str>, &str)] = &[
     (&["Image", "Image Rotation"], "---", None, "---"),
     (&["Image", "Image Rotation"], "Flip Canvas Horizontal", None, "image.imageRotation.flipCanvasHorizontal"),
     (&["Image", "Image Rotation"], "Flip Canvas Vertical", None, "image.imageRotation.flipCanvasVertical"),
+    (&["Image", "Image Rotation"], "---", None, "---"),
+    (&["Image", "Image Rotation"], "Rotate Panorama…", None, "image.rotatePanorama"),
     (&["Image"], "Crop", None, "image.crop"),
     (&["Image"], "Trim…", None, "image.trim"),
     (&["Image"], "Reveal All", None, "image.revealAll"),

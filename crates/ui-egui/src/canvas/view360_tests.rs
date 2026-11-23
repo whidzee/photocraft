@@ -452,3 +452,40 @@ fn paste_lands_where_the_view_looks() {
     let [u, v] = latlong_at(RECT.center());
     assert!(pixel(&app, u, v)[0] > 0.9 && pixel(&app, u, v)[1] < 0.2, "{:?}", pixel(&app, u, v));
 }
+
+/// The preview's quaternion turns a direction the same way as the rotation it came from: a wrong one would preview a
+/// different turn from the one OK applies.
+#[test]
+fn the_preview_quaternion_matches_its_rotation() {
+    for [y, p, r] in [[30.0, 0.0, 0.0], [-120.0, 40.0, 10.0], [179.0, -80.0, -45.0], [0.0, 0.0, 170.0]] {
+        let m = photocraft_engine::projected_transform::panorama_rotation(y, p, r);
+        let q = quaternion(&m).map(f64::from);
+        for d in [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.36, -0.48, 0.8]] {
+            // v + 2·q × (q × v + w·v)
+            let cross = |a: [f64; 3], b: [f64; 3]| [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+            let v = [q[0], q[1], q[2]];
+            let t = cross(v, d);
+            let t = [t[0] + q[3] * d[0], t[1] + q[3] * d[1], t[2] + q[3] * d[2]];
+            let t = cross(v, t);
+            let turned = [d[0] + 2.0 * t[0], d[1] + 2.0 * t[1], d[2] + 2.0 * t[2]];
+            assert!(angle(turned, rot(&m, d)) < 0.05, "{y} {p} {r}: {turned:?} vs {:?}", rot(&m, d));
+        }
+    }
+}
+
+/// Image › Rotate Panorama with no turn opens the dialog, whose fields the 360° View previews; with one it applies.
+#[test]
+fn rotate_panorama_opens_previews_and_applies() {
+    let mut app = app(800, 400, Tool::Hand);
+    let ctx = app.ctx().clone();
+    crate::menus::invoke(&mut app, &ctx, "image.rotatePanorama", json!({})).unwrap();
+    assert!(crate::dialogs::rotate_panorama::preview(&app).is_some_and(|q| q == photocraft_engine::equirect::IDENTITY));
+    let c = RECT.center();
+    let at = latlong_at(c);
+    spot(&mut app, at, "#ff0000");
+    let steps = app.session.documents()[0].history.past_len();
+    crate::menus::invoke(&mut app, &ctx, "image.rotatePanorama", json!({"yaw": 90})).unwrap();
+    assert_eq!(app.session.documents()[0].history.past_len(), steps + 1);
+    assert!(pixel(&app, at[0], at[1])[1] > 0.5, "the red turned away from the front");
+    assert!(pixel(&app, at[0] + 200.0, at[1])[1] < 0.2, "a quarter turn to the right: {:?}", pixel(&app, at[0] + 200.0, at[1]));
+}

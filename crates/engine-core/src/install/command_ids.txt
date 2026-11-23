@@ -46,6 +46,7 @@ paint.projectedTool
 select.projected
 layer.projectedRotate
 layer.projectedPlace
+image.rotatePanorama
 tools.setColors
 tools.swapColors
 tools.defaultColors

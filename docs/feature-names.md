@@ -19,3 +19,7 @@ The catalog cleanup removes 136 dormant rows for branded composer labels, PDF pr
 ## 360° View
 
 **360° View** (View menu, `view.view360`, #15726) shows a 2:1 equirectangular image from the centre of its sphere, so it can be looked around in and painted on. The name says what it does in ordinary words and doesn't use the name another editor gives its own version of this view. The trademark searches in standards/naming.md rule 4 have not been run for it yet.
+
+## Rotate Panorama
+
+**Rotate Panorama** (Image › Image Rotation, `image.rotatePanorama`, #15726) turns a 2:1 equirectangular image on its sphere by yaw, pitch and roll. The name describes what it does in ordinary words. The trademark searches in standards/naming.md rule 4 have not been run for it yet.

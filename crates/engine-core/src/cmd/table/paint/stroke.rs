@@ -57,5 +57,14 @@ pub fn specs() -> Vec<CommandSpec> {
             has_doc,
             crate::projected_transform::projected_place
         ),
+        cmd!(
+            "image.rotatePanorama",
+            "Rotate Panorama",
+            [],
+            None,
+            r##"{"yaw":deg (right)=0,"pitch":deg (up)=0,"roll":deg (clockwise)=0} — Image › Rotate Panorama: turns the whole latlong on its sphere, every pixel layer and mask; the selection is dropped"##,
+            has_doc,
+            crate::projected_transform::rotate_panorama
+        ),
     ]
 }

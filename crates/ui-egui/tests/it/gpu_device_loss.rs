@@ -419,6 +419,7 @@ mod gpu_tests {
                     output: 0,
                     hdr: None,
                     projection: None,
+                    sphere_turn: None,
                 },
             }
         });

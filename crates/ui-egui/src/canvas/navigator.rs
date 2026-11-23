@@ -39,6 +39,7 @@ pub fn navigator_gpu_view(app: &PhotocraftApp, idx: usize, rect: Rect, ctx: &egu
         center: [w as f32 / 2.0, h as f32 / 2.0],
         rotation: 0.0,
         projection: None,
+        sphere_turn: None,
         view_key: egui::Id::unique(("pc-navigator", ctx.viewport_id(), idx)).value(),
         ..params
     })

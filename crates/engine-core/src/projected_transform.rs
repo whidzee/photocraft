@@ -341,6 +341,91 @@ pub fn projected_rotate(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({}))
 }
 
+/// The rotation of Image › Rotate Panorama: `roll` (clockwise, about the image centre's direction), then `pitch`
+/// (up), then `yaw` (right), in degrees. Content at direction `d` moves to `R·d`.
+pub fn panorama_rotation(yaw: f64, pitch: f64, roll: f64) -> Rot {
+    let (sy, cy) = yaw.to_radians().sin_cos();
+    let (sp, cp) = pitch.to_radians().sin_cos();
+    let (sr, cr) = roll.to_radians().sin_cos();
+    let ry = [[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]];
+    let rx = [[1.0, 0.0, 0.0], [0.0, cp, sp], [0.0, -sp, cp]];
+    let rz = [[cr, sr, 0.0], [-sr, cr, 0.0], [0.0, 0.0, 1.0]];
+    mul(&ry, &mul(&rx, &rz))
+}
+
+fn mul(a: &Rot, b: &Rot) -> Rot {
+    let mut m = [[0.0; 3]; 3];
+    for (i, row) in m.iter_mut().enumerate() {
+        for (j, v) in row.iter_mut().enumerate() {
+            *v = (0..3).map(|k| a[i][k] * b[k][j]).sum();
+        }
+    }
+    m
+}
+
+/// Every pixel of `surf` (an `iw` × `ih` latlong) resampled through `inv` (where each pixel's content comes from).
+fn turn_surface(surf: &mut Surface, inv: &Rot, iw: i32, ih: i32, trig: &Trig) {
+    let (fw, fh) = (f64::from(iw), f64::from(ih));
+    let n = surf.channels();
+    let src = Band::read(surf, iw, 0, ih);
+    let mut y0 = 0;
+    while y0 < ih {
+        // Rows in bands: one full output copy of a 20k F32 latlong is 3 GB.
+        let y1 = (y0 + 1024).min(ih);
+        let r = Rect::new(0, y0, iw, y1);
+        let mut out = vec![0f32; iw as usize * (y1 - y0) as usize * n];
+        out.par_chunks_mut(iw as usize * n).enumerate().for_each(|(j, line)| {
+            let y = y0 + j as i32;
+            let mut c = vec![0f32; n];
+            for (x, px) in line.chunks_mut(n).enumerate() {
+                let [u, v] = dir_to_equirect(rot(inv, trig.dir(x as i32, y)), fw, fh);
+                src.sample(u, v, &mut c);
+                px.copy_from_slice(&c);
+            }
+        });
+        surf.write_region(r, &out);
+        y0 = y1;
+    }
+}
+
+/// `image.rotatePanorama`: Image › Rotate Panorama turns the whole latlong on its sphere by `yaw`, `pitch` and
+/// `roll` (degrees, see [`panorama_rotation`]): every pixel layer and layer mask, as one History step. Levels a
+/// tilted horizon or sets which way is the front. The selection is dropped, as it would no longer fit.
+pub fn rotate_panorama(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "image.rotatePanorama";
+    let num = |k: &str| -> Result<f64> {
+        match p.get(k) {
+            None | Some(Value::Null) => Ok(0.0),
+            Some(v) => {
+                v.as_f64().filter(|v| v.is_finite() && v.abs() <= 360.0).ok_or_else(|| bad(CMD, format!("`{k}` must be a number of degrees, -360..=360")))
+            }
+        }
+    };
+    let q = panorama_rotation(num("yaw")?, num("pitch")?, num("roll")?);
+    let inv = transpose(&q);
+    s.active().ok_or(EngineError::NoDocument)?;
+    s.edit("Rotate Panorama", |doc, _| {
+        let (iw, ih) = (doc.size.width as i32, doc.size.height as i32);
+        let trig = Trig::new(iw, ih);
+        let ids: Vec<_> = doc.walk().into_iter().map(|(_, _, l)| l.id).collect();
+        for id in ids {
+            let Some(layer) = doc.layer_mut(id) else { continue };
+            if let Some(surf) = layer.surface_mut() {
+                turn_surface(surf, &inv, iw, ih, &trig);
+            }
+            if let Some(mask) = layer.mask.as_mut() {
+                turn_surface(&mut mask.surface, &inv, iw, ih, &trig);
+            }
+        }
+        doc.selection = None;
+        Ok(())
+    })?;
+    if let Some(st) = s.active_mut() {
+        st.last_damage = None;
+    }
+    Ok(json!({}))
+}
+
 /// The homography taking the four `from` points to the four `to` points (row-major 3×3).
 pub fn homography(from: [[f64; 2]; 4], to: [[f64; 2]; 4]) -> Option<[f64; 9]> {
     let mut a = [[0f64; 9]; 8];
@@ -984,5 +1069,50 @@ mod move_region_tests {
             let mdiff = ma.iter().zip(&mb).filter(|(x, y)| (*x - *y).abs() > 1e-6).count();
             assert_eq!((diff, mdiff), (0, 0), "{sel:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod rotate_panorama_tests {
+    use super::*;
+    use crate::equirect::equirect_to_dir;
+
+    fn angle(a: [f64; 3], b: [f64; 3]) -> f64 {
+        (a[0] * b[0] + a[1] * b[1] + a[2] * b[2]).clamp(-1.0, 1.0).acos().to_degrees()
+    }
+
+    /// Yaw turns right, pitch up and roll clockwise: what was ahead moves right, up, and what was right moves down.
+    #[test]
+    fn the_rotation_turns_the_way_its_names_say() {
+        let ahead = [0.0, 0.0, 1.0];
+        let r = rot(&panorama_rotation(30.0, 0.0, 0.0), ahead);
+        assert!(r[0] > 0.0 && angle(r, ahead) > 29.9);
+        assert!(rot(&panorama_rotation(0.0, 20.0, 0.0), ahead)[1] > 0.3);
+        assert!(rot(&panorama_rotation(0.0, 0.0, 10.0), [1.0, 0.0, 0.0])[1] < -0.1);
+    }
+
+    /// A red spot ahead lands where the rotation sends it and leaves where it was, as one History step.
+    #[test]
+    fn rotate_panorama_moves_the_spot_in_one_step() {
+        let mut s = crate::session();
+        s.execute("file.new", json!({"width": 512, "height": 256})).unwrap();
+        let ahead = [256.0, 128.0];
+        s.execute("select.rect", json!({"x": 250, "y": 122, "width": 12, "height": 12})).unwrap();
+        s.execute("edit.fill", json!({"color": "#ff0000"})).unwrap();
+        let steps = s.active().unwrap().history.past_len();
+        s.execute("image.rotatePanorama", json!({"yaw": 40, "pitch": 15, "roll": 5})).unwrap();
+        let st = s.active().unwrap();
+        assert_eq!(st.history.past_len(), steps + 1);
+        assert!(st.doc.selection.is_none());
+        let to = rot(&panorama_rotation(40.0, 15.0, 5.0), equirect_to_dir(ahead[0], ahead[1], 512.0, 256.0));
+        let [u, v] = dir_to_equirect(to, 512.0, 256.0);
+        let surf = st.doc.layer(st.active_layer.unwrap()).unwrap().surface().unwrap();
+        let px = |x: f64, y: f64| {
+            let mut c = vec![0f32; surf.channels()];
+            surf.read_pixel(x as i32, y as i32, &mut c);
+            c
+        };
+        assert!(px(u, v)[1] < 0.2, "the red is where it was sent: {:?}", px(u, v));
+        assert!(px(ahead[0], ahead[1])[1] > 0.5, "and gone from where it was");
     }
 }

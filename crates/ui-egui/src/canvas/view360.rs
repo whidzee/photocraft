@@ -483,11 +483,13 @@ pub(crate) fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui, host: CanvasHost,
             output: output.unwrap_or(0),
             hdr: super::display::hdr_preview(app, &doc),
             projection: Some([look.yaw, look.pitch, look.fov]),
+            // Image › Rotate Panorama's preview: the content turned, before it is applied.
+            sphere_turn: crate::dialogs::rotate_panorama::preview(app).map(|q| quaternion(&transpose(&q))),
         };
         crate::gpu_canvas::GpuCanvas::paint(&painter, rect, params);
         // The Navigator draws the same texture flat.
         if app.navigator_plain.contains(&doc.id) {
-            app.navigator_gpu.insert(doc.id, crate::gpu_canvas::ViewParams { projection: None, view_key: params.view_key ^ 1, ..params });
+            app.navigator_gpu.insert(doc.id, crate::gpu_canvas::ViewParams { projection: None, sphere_turn: None, view_key: params.view_key ^ 1, ..params });
         }
     } else {
         app.navigator_gpu.remove(&doc.id);
@@ -497,6 +499,10 @@ pub(crate) fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui, host: CanvasHost,
         });
     }
 
+    // Image › Rotate Panorama is open: the true horizon and the front, to line the turned image up with.
+    if crate::dialogs::rotate_panorama::preview(app).is_some() {
+        guides(&painter, rect, ppp, &vp, &colors);
+    }
     let pass = super::view360_select::Pass { rect, ppp, look: &look, vp: &vp };
     super::view360_select::ants(app, &ctx, &painter, host.canvas_id(), idx, &pass);
     if held {
@@ -720,6 +726,61 @@ fn flat(q: &Rot) -> [f64; 9] {
 /// The rotation [`flat`] kept.
 fn unflat(q: &[f64; 9]) -> Rot {
     [[q[0], q[1], q[2]], [q[3], q[4], q[5]], [q[6], q[7], q[8]]]
+}
+
+/// The true horizon (level, all the way round) and the front (straight ahead, from the ground up to the sky), dashed
+/// over the view.
+fn guides(painter: &egui::Painter, rect: Rect, ppp: f32, vp: &ViewProjection, colors: &Colors) {
+    let tau = std::f64::consts::TAU;
+    let horizon = (0..=360).map(|i| f64::from(i) * tau / 360.0).map(|t| [t.sin(), 0.0, t.cos()]).collect::<Vec<_>>();
+    let front = (-89..=89).map(|i| f64::from(i).to_radians()).map(|a| [0.0, a.sin(), a.cos()]).collect::<Vec<_>>();
+    for line in [horizon, front] {
+        let mut run: Vec<Pos2> = Vec::new();
+        let flush = |run: &mut Vec<Pos2>| {
+            if run.len() > 1 {
+                painter.extend(egui::Shape::dashed_line(run, Stroke::new(3.0, colors.halo), 8.0, 6.0));
+                painter.extend(egui::Shape::dashed_line(run, Stroke::new(1.0, colors.line), 8.0, 6.0));
+            }
+            run.clear();
+        };
+        for d in line {
+            match vp.dir_to_view(d) {
+                Some([x, y]) => {
+                    let p = rect.min + vec2(x as f32, y as f32) / ppp;
+                    if run.last().is_some_and(|l| l.distance(p) > rect.width()) {
+                        flush(&mut run);
+                    }
+                    run.push(p);
+                }
+                None => flush(&mut run),
+            }
+        }
+        flush(&mut run);
+    }
+}
+
+/// `q` transposed: for a rotation, its inverse.
+fn transpose(q: &Rot) -> Rot {
+    [[q[0][0], q[1][0], q[2][0]], [q[0][1], q[1][1], q[2][1]], [q[0][2], q[1][2], q[2][2]]]
+}
+
+/// Rotation `m` as a unit quaternion `x, y, z, w`.
+fn quaternion(m: &Rot) -> [f32; 4] {
+    let t = m[0][0] + m[1][1] + m[2][2];
+    let q = if t > 0.0 {
+        let s = (t + 1.0).sqrt() * 2.0;
+        [(m[2][1] - m[1][2]) / s, (m[0][2] - m[2][0]) / s, (m[1][0] - m[0][1]) / s, s / 4.0]
+    } else if m[0][0] > m[1][1] && m[0][0] > m[2][2] {
+        let s = (1.0 + m[0][0] - m[1][1] - m[2][2]).sqrt() * 2.0;
+        [s / 4.0, (m[0][1] + m[1][0]) / s, (m[0][2] + m[2][0]) / s, (m[2][1] - m[1][2]) / s]
+    } else if m[1][1] > m[2][2] {
+        let s = (1.0 + m[1][1] - m[0][0] - m[2][2]).sqrt() * 2.0;
+        [(m[0][1] + m[1][0]) / s, s / 4.0, (m[1][2] + m[2][1]) / s, (m[0][2] - m[2][0]) / s]
+    } else {
+        let s = (1.0 + m[2][2] - m[0][0] - m[1][1]).sqrt() * 2.0;
+        [(m[0][2] + m[2][0]) / s, (m[1][2] + m[2][1]) / s, s / 4.0, (m[1][0] - m[0][1]) / s]
+    };
+    q.map(|v| v as f32)
 }
 
 /// A small cross at `p`, over a halo so it reads on any image.

@@ -14,6 +14,7 @@ fn picture(shows: Shows, k: u32, growth: [f32; 2]) -> GpuPicture {
         output: 0,
         hdr: None,
         projection: None,
+        sphere_turn: None,
     };
     GpuPicture { params, shows, k, growth, bounds: DRect::new(0, 0, 400, 300) }
 }

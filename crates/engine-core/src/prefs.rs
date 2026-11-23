@@ -100,6 +100,11 @@ choice!(
     RightClickPaint { BrushPicker = "brushPicker", Erase = "erase" } default BrushPicker
 );
 choice!(
+    /// View › 360° View: what a drag does. Grab Image keeps the spot under the pointer under it as the view turns;
+    /// Turn Camera turns the view the way the pointer moves, as in a game.
+    SphereDrag { GrabImage = "grabImage", TurnCamera = "turnCamera" } default GrabImage
+);
+choice!(
     /// Windows: which pen input supplies pressure. Windows Ink is the default; WinTab needs
     /// Windows Ink turned off in the tablet driver's utility and a restart.
     TabletInput { WindowsInk = "windowsInk", WinTab = "winTab" } default WindowsInk
@@ -526,6 +531,8 @@ pub struct Tools {
     /// The longest pause, in milliseconds, between two nudges that still bundle into one state.
     /// Longer than a key's auto-repeat delay (about half a second), so a held key is one state.
     pub nudge_bundle_pause_ms: u32,
+    /// View › 360° View: whether a drag grabs the image or turns the camera.
+    pub sphere_drag: SphereDrag,
 }
 
 impl Default for Tools {
@@ -547,6 +554,7 @@ impl Default for Tools {
             pressure_curve: vec![[0.0, 0.0], [1.0, 1.0]],
             bundle_nudges: true,
             nudge_bundle_pause_ms: 1000,
+            sphere_drag: SphereDrag::GrabImage,
         }
     }
 }

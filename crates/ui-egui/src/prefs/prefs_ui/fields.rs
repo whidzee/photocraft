@@ -220,6 +220,7 @@ fn label_override(key: &str) -> Option<&'static str> {
         "notificationDurationSeconds" => "Notification Duration (seconds)",
         "bundleNudges" => "Bundle Arrow-Key Nudges",
         "nudgeBundlePauseMs" => "Nudge Bundle Pause (ms)",
+        "sphereDrag" => "360° View Drag",
         "doNotAppendCopy" => "Do not append \"copy\" to filename when saving a copy",
         "pcraftFullComposite" => "Save Full-Size Composite in .pcraft Files",
         "generatorEnabled" => "Enable Generator",

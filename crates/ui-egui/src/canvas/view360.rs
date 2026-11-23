@@ -17,10 +17,12 @@
 use craft::theme::Variant;
 use craft::theme::variant::{Emphasis, Tone};
 use craft::ui::canvas::{ViewCommands, ViewRequest};
-use craft::ui::contract::{Props as _, Show as _};
+use craft::ui::contract::{Bind, Props as _, Show as _};
 use craft::ui::display::{Badge, Text};
 use craft::ui::notices::{Notice, NoticeLayout};
 use craft::ui::style::StyleCx;
+use craft::ui::text::NumberField;
+use craft::ui::value_drag::Slider;
 use egui::{Color32, PointerButton, Pos2, Rect, Sense, Stroke, vec2};
 use photocraft_engine::brush_cmds::ProjectedPreview;
 use photocraft_engine::equirect::{Camera, MAX_FOV, MAX_PITCH, MIN_FOV, ViewProjection, wrap_deg};
@@ -67,11 +69,30 @@ impl SphereView {
         SphereView { yaw: c.yaw as f32, pitch: c.pitch as f32, fov: c.fov as f32 }
     }
 
-    /// Looks by a pointer drag of `d` points over a view `h` points tall: the image follows the pointer, one view
-    /// height turning by the field of view.
-    pub fn drag(&mut self, d: egui::Vec2, h: f32) {
+    /// Turn Camera: a pointer drag of `d` points over a view `h` points tall turns the view the way the pointer
+    /// moves, one view height by the field of view.
+    pub fn steer(&mut self, d: egui::Vec2, h: f32) {
         let k = self.fov / h.max(1.0);
-        self.turn(-d.x * k, d.y * k);
+        self.turn(d.x * k, -d.y * k);
+    }
+
+    /// Grab Image: turns the camera so world direction `dir` shows at view pixel `at` of a `size` (device pixels)
+    /// view, with no roll. Near a pole, where no upright camera can put it there, the pitch stops at the nearest
+    /// one that comes closest.
+    pub fn hold(&mut self, dir: [f64; 3], at: [f64; 2], size: [f64; 2]) {
+        let vp = ViewProjection::new(self.camera(), size[0], size[1]);
+        // The ray through `at` in the camera's own frame: right, up, forward.
+        let k = (vp.cam.fov.to_radians() / 2.0).tan() / (vp.h / 2.0);
+        let (cx, cy, cz) = ((at[0] - vp.w / 2.0) * k, -(at[1] - vp.h / 2.0) * k, 1.0);
+        // Pitch p with cy·cos p + cz·sin p = dir.y·|c|.
+        let n = (cx * cx + cy * cy + cz * cz).sqrt();
+        let r = (cy * cy + cz * cz).sqrt();
+        let want = (dir[1] * n / r).clamp(-1.0, 1.0);
+        let pitch = want.asin() - cy.atan2(cz);
+        let a = cz * pitch.cos() - cy * pitch.sin();
+        let yaw = dir[0].atan2(dir[2]) - cx.atan2(a);
+        self.yaw = wrap_deg(yaw.to_degrees()) as f32;
+        self.pitch = (pitch.to_degrees() as f32).clamp(-MAX_PITCH as f32, MAX_PITCH as f32);
     }
 
     /// Turns by `yaw` and `pitch` degrees.
@@ -332,10 +353,17 @@ pub(crate) fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui, host: CanvasHost,
     if !ctx.input(|i| i.pointer.any_down()) && !response.drag_stopped() {
         app.view360_stroke = None;
     }
+    let to_view = |p: Pos2| -> [f64; 2] { [f64::from((p.x - rect.min.x) * ppp), f64::from((p.y - rect.min.y) * ppp)] };
+    let size = [w_px, h_px];
     if response.hovered() {
         let dy = ctx.input(|i| i.smooth_scroll_delta.y);
         if dy != 0.0 {
+            // The spot under the pointer stays under it.
+            let under = response.hover_pos().map(|p| (ViewProjection::new(look.camera(), w_px, h_px).view_to_dir(to_view(p)[0], to_view(p)[1]), to_view(p)));
             look.scale_fov((-dy * 0.002).exp());
+            if let Some((dir, at)) = under {
+                look.hold(dir, at, size);
+            }
         }
     }
     if response.has_focus() {
@@ -343,8 +371,26 @@ pub(crate) fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui, host: CanvasHost,
     }
     let painting = gesture == Gesture::Paint && active;
     let looks = response.dragged_by(PointerButton::Middle) || (response.dragged_by(PointerButton::Primary) && !painting);
+    let grabbed = host.canvas_id().with("360-grab");
     if looks {
-        look.drag(response.drag_delta(), rect.height());
+        match app.session.prefs().tools.sphere_drag {
+            photocraft_engine::prefs::SphereDrag::TurnCamera => look.steer(response.drag_delta(), rect.height()),
+            photocraft_engine::prefs::SphereDrag::GrabImage => {
+                // The direction first pressed stays under the pointer for the whole drag.
+                let dir = ctx.data(|d| d.get_temp::<[f64; 3]>(grabbed)).or_else(|| {
+                    let start = ctx.input(|i| i.pointer.press_origin())?;
+                    let [x, y] = to_view(start);
+                    let dir = ViewProjection::new(look.camera(), w_px, h_px).view_to_dir(x, y);
+                    ctx.data_mut(|d| d.insert_temp(grabbed, dir));
+                    Some(dir)
+                });
+                if let (Some(dir), Some(p)) = (dir, response.interact_pointer_pos()) {
+                    look.hold(dir, to_view(p), size);
+                }
+            }
+        }
+    } else {
+        ctx.data_mut(|d| d.remove::<[f64; 3]>(grabbed));
     }
     if gesture == Gesture::Zoom
         && response.clicked()
@@ -572,9 +618,25 @@ pub(crate) fn navigator(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize) 
     let readout = look.readout();
     let name = crate::i18n::fmt(tl!("Navigator, 360° View, {readout}"), &[("readout", &readout)]);
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Canvas, true, &name));
-    Text::new(readout).show(ui);
-    if let Some(v) = app.ui.views.get_mut(idx) {
-        v.projection = Some(look.clamped());
+    // The camera typed or slid, through the view's own command.
+    let (mut yaw, mut pitch, mut fov) = (f64::from(look.yaw), f64::from(look.pitch), f64::from(look.fov));
+    Slider::new(Bind::bound(&mut fov), MIN_FOV..=MAX_FOV).step(0.5).label(tl!("Field of view")).show(ui);
+    for (name, value, range) in
+        [(tl!("Yaw"), &mut yaw, -180.0..=180.0), (tl!("Pitch"), &mut pitch, -MAX_PITCH..=MAX_PITCH), (tl!("Field of view"), &mut fov, MIN_FOV..=MAX_FOV)]
+    {
+        ui.horizontal(|ui| {
+            Text::new(name).show(ui);
+            let mut field = Some(*value);
+            NumberField::new(name, Bind::bound(&mut field)).range(range).show(ui);
+            if let Some(v) = field.filter(|v| v.is_finite()) {
+                *value = v;
+            }
+        });
+    }
+    let typed = SphereView { yaw: yaw as f32, pitch: pitch as f32, fov: fov as f32 };
+    let look = if typed != look { typed } else { look };
+    if Some(look) != app.ui.views.get(idx).and_then(|v| v.projection) {
+        let _ = command(app, &json!({"on": true, "yaw": look.yaw, "pitch": look.pitch, "fov": look.fov}));
     }
 }
 

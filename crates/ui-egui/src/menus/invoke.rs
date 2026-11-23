@@ -123,6 +123,10 @@ fn invoke_early_commands(app: &mut PhotocraftApp, ctx: &egui::Context, id: &str,
         crate::paint_mouse::sync_tool_brush(app);
         return Some(Ok(json!({"tool": tool})));
     }
+    // Paste and Free Transform in View › 360° View.
+    if let Some(r) = crate::canvas::view360_xform::intercept(app, ctx, id, params) {
+        return Some(r);
+    }
     if id == "layer.frame.convert" && params.as_object().is_none_or(|o| o.is_empty()) {
         return Some(frame_convert_dialog(app, id));
     }

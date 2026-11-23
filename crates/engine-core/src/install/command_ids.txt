@@ -44,6 +44,8 @@ paint.stroke
 paint.projectedStroke
 paint.projectedTool
 select.projected
+layer.projectedRotate
+layer.projectedPlace
 tools.setColors
 tools.swapColors
 tools.defaultColors

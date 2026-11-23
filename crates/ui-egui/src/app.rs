@@ -85,6 +85,7 @@ impl PhotocraftApp {
             data_set_preview: Default::default(),
             view360_stroke: None,
             view360_ants: None,
+            view360_xform: None,
             held_erase: false,
             last_stroke_end: None,
             brush_resize: Default::default(),

@@ -45,6 +45,7 @@ pub mod preset_store;
 pub mod presets;
 pub mod projected_select;
 pub mod projected_tool;
+pub mod projected_transform;
 pub mod proof_sim;
 mod scratch;
 pub mod select_mask_edits;

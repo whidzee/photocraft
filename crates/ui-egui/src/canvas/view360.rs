@@ -14,6 +14,8 @@
 //!   Spot Healing Brush runs on the view too.
 //! - The Rectangular and Elliptical Marquee, Lasso and Magic Wand select in the view, and the Patch tool patches the
 //!   selection from where it is dropped (`view360_select`). The marching ants follow the camera.
+//! - The Move tool turns the layer (or the selection's contents) across the sphere; Edit › Free Transform puts a box
+//!   in the view, and Edit › Paste lands the clipboard upright where you look (`view360_xform`).
 //! - Other tools don't work in the view yet; pressing with one says so in the status bar and looks around.
 //! - The Navigator outlines what the view sees on the flat image; a click there looks at that spot.
 //!
@@ -351,6 +353,7 @@ fn seen(vp: &ViewProjection, size: photocraft_geom::Size) -> photocraft_geom::Re
 enum Gesture {
     Paint,
     Select,
+    Move,
     Zoom,
     Look,
 }
@@ -360,6 +363,7 @@ fn gesture(tool: Tool, space: bool) -> Gesture {
         _ if space => Gesture::Look,
         Tool::Brush | Tool::Eraser | Tool::CloneStamp | Tool::Healing | Tool::SpotHealing => Gesture::Paint,
         Tool::Zoom => Gesture::Zoom,
+        Tool::Move => Gesture::Move,
         t if super::view360_select::supported(t) => Gesture::Select,
         _ => Gesture::Look,
     }
@@ -416,8 +420,10 @@ pub(crate) fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui, host: CanvasHost,
     if response.has_focus() {
         look_keys(&ctx, &mut look);
     }
-    let painting = matches!(gesture, Gesture::Paint | Gesture::Select) && active;
-    let looks = response.dragged_by(PointerButton::Middle) || (response.dragged_by(PointerButton::Primary) && !painting);
+    // A Free Transform holds the view: no looking around while its box is up.
+    let held = super::view360_xform::holds_view(app, idx);
+    let painting = (matches!(gesture, Gesture::Paint | Gesture::Select | Gesture::Move) && active) || held;
+    let looks = !held && (response.dragged_by(PointerButton::Middle) || (response.dragged_by(PointerButton::Primary) && !painting));
     let grabbed = host.canvas_id().with("360-grab");
     if looks {
         match app.session.prefs().tools.sphere_drag {
@@ -493,7 +499,11 @@ pub(crate) fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui, host: CanvasHost,
 
     let pass = super::view360_select::Pass { rect, ppp, look: &look, vp: &vp };
     super::view360_select::ants(app, &ctx, &painter, host.canvas_id(), idx, &pass);
-    if painting && gesture == Gesture::Select {
+    if held {
+        super::view360_xform::transform(app, &ctx, &response, &painter, rect, ppp, idx);
+    } else if painting && gesture == Gesture::Move {
+        super::view360_xform::move_tool(app, &ctx, &response, &painter, idx, &pass);
+    } else if painting && gesture == Gesture::Select {
         super::view360_select::tool(app, &ctx, &response, &painter, host.canvas_id(), &pass);
     } else if painting {
         look = paint(app, &ctx, &response, &painter, &Frame { rect, look, vp, doc: doc.id });

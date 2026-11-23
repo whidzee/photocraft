@@ -397,3 +397,58 @@ fn the_patch_tool_patches_from_where_the_selection_is_dropped() {
     drag(&mut app, &[c, c + vec2(20.0, 0.0), c + vec2(80.0, 0.0)]);
     assert!(pixel(&app, at[0], at[1])[0] > 0.5, "patched from the white: {:?}", pixel(&app, at[0], at[1]));
 }
+
+/// The Move tool drags the layer across the sphere: the spot pressed ends up under the release.
+#[test]
+fn the_move_tool_turns_the_layer_under_the_pointer() {
+    let mut app = app(800, 400, Tool::Move);
+    let (from, to) = (pos2(150.0, 150.0), pos2(260.0, 120.0));
+    spot(&mut app, latlong_at(from), "#ff0000");
+    let steps = app.session.documents()[0].history.past_len();
+    drag(&mut app, &[from, from + vec2(20.0, -5.0), to]);
+    assert_eq!(app.session.documents()[0].history.past_len(), steps + 1);
+    let [u, v] = latlong_at(to);
+    assert!(pixel(&app, u, v)[1] < 0.2, "the red moved here: {:?}", pixel(&app, u, v));
+    let [u, v] = latlong_at(from);
+    assert!(pixel(&app, u, v)[1] > 0.5, "and left here");
+}
+
+/// Free Transform in the view: a drag inside its box moves the selected pixels, Enter applies, and the view holds
+/// still while it is up.
+#[test]
+fn free_transform_moves_the_selection_and_holds_the_view() {
+    let mut app = app(800, 400, Tool::Hand);
+    app.last_canvas_rect = RECT;
+    let c = RECT.center();
+    let at = latlong_at(c);
+    spot(&mut app, at, "#ff0000");
+    app.run("select.rect", json!({"x": at[0] - 12.0, "y": at[1] - 12.0, "width": 24, "height": 24})).unwrap();
+    let ctx = app.ctx().clone();
+    crate::menus::invoke(&mut app, &ctx, "edit.freeTransform", json!({})).unwrap();
+    let before = look(&app);
+    let to = c + vec2(60.0, 0.0);
+    drag(&mut app, &[c, c + vec2(20.0, 0.0), to]);
+    assert_eq!(look(&app).yaw, before.yaw, "the view held still");
+    let enter = Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE };
+    pass(&mut app, vec![enter]);
+    let [u, v] = latlong_at(to);
+    assert!(pixel(&app, u, v)[1] < 0.2, "moved: {:?}", pixel(&app, u, v));
+}
+
+/// Paste in the view lands the clipboard as a new layer in the middle of the view.
+#[test]
+fn paste_lands_where_the_view_looks() {
+    let mut app = app(800, 400, Tool::Hand);
+    app.last_canvas_rect = RECT;
+    let side = latlong_at(pos2(60.0, 150.0));
+    spot(&mut app, side, "#ff0000");
+    app.run("select.rect", json!({"x": side[0] - 10.0, "y": side[1] - 10.0, "width": 20, "height": 20})).unwrap();
+    app.run("edit.copy", json!({})).unwrap();
+    app.run("select.deselect", json!({})).unwrap();
+    let layers = app.session.documents()[0].doc.layers.len();
+    let ctx = app.ctx().clone();
+    crate::menus::invoke(&mut app, &ctx, "edit.paste", json!({})).unwrap();
+    assert_eq!(app.session.documents()[0].doc.layers.len(), layers + 1);
+    let [u, v] = latlong_at(RECT.center());
+    assert!(pixel(&app, u, v)[0] > 0.9 && pixel(&app, u, v)[1] < 0.2, "{:?}", pixel(&app, u, v));
+}

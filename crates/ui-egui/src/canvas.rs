@@ -70,6 +70,7 @@ pub(crate) mod view360;
 #[cfg(test)]
 mod view360_drag_tests;
 pub(crate) mod view360_select;
+pub(crate) mod view360_xform;
 pub(crate) mod viewport_pages;
 
 pub(crate) use cursor_policy::alt_samples;

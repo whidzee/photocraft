@@ -1,4 +1,4 @@
-use crate::cmd::{CommandSpec, has_paintable};
+use crate::cmd::{CommandSpec, has_doc, has_paintable};
 
 /// Painting: the stroke commands (the flat canvas and View › 360° View).
 pub fn specs() -> Vec<CommandSpec> {
@@ -29,6 +29,15 @@ pub fn specs() -> Vec<CommandSpec> {
             r##"{"command":"paint.healingBrush|paint.spotHealing|paint.patch","params":{…that command's params, without points…},"points":[[x,y,pressure],…] (view px),"rotation":[9 numbers]? (Healing/Patch: destination→source on the sphere),"projection":{"yaw","pitch","fov","width","height"}} — View › 360° View: a retouch tool stroke drawn in the perspective view, reprojected onto the equirect pixels"##,
             has_paintable,
             crate::projected_tool::projected_tool
+        ),
+        cmd!(
+            "select.projected",
+            "Projected Selection",
+            [],
+            None,
+            r##"{"kind":"rect|ellipse|lasso|wand|quick|object|row|column","rect":[x0,y0,x1,y1],"points":[[x,y],…],"mode":"replace|add|subtract|intersect","feather":px,"antiAlias":bool,"tolerance":n,"contiguous":bool,"size":px,"sampleAllLayers":bool,"projection":{"yaw":deg,"pitch":deg,"fov":deg,"width":px,"height":px}} — View › 360° View: a selection drawn in the perspective view, reprojected onto the equirect selection"##,
+            has_doc,
+            crate::projected_select::select_projected
         ),
     ]
 }

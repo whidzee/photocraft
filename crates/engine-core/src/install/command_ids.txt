@@ -43,6 +43,7 @@ image.adjustments.desaturate
 paint.stroke
 paint.projectedStroke
 paint.projectedTool
+select.projected
 tools.setColors
 tools.swapColors
 tools.defaultColors

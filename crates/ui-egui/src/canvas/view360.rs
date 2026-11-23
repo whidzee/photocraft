@@ -12,6 +12,8 @@
 //!   the sphere: the stroke paints through a rotation of the sphere, so the source isn't distorted where it lands
 //!   (`paint.projectedClone`, `paint.projectedTool`). Aligned keeps the first stroke's rotation for later ones. The
 //!   Spot Healing Brush runs on the view too.
+//! - The Rectangular and Elliptical Marquee, Lasso and Magic Wand select in the view, and the Patch tool patches the
+//!   selection from where it is dropped (`view360_select`). The marching ants follow the camera.
 //! - Other tools don't work in the view yet; pressing with one says so in the status bar and looks around.
 //! - The Navigator outlines what the view sees on the flat image; a click there looks at that spot.
 //!
@@ -271,16 +273,22 @@ enum Preview {
 }
 
 /// The theme colours the view draws with.
-struct Colors {
-    pasteboard: Color32,
-    line: Color32,
-    halo: Color32,
+pub(crate) struct Colors {
+    pub pasteboard: Color32,
+    pub line: Color32,
+    pub halo: Color32,
+    pub marquee: Color32,
 }
 
-fn colors(ctx: &egui::Context) -> Colors {
+pub(crate) fn colors(ctx: &egui::Context) -> Colors {
     StyleCx::with_root(ctx, |cx| {
         let c = &cx.tokens.color;
-        Colors { pasteboard: cx.color(c.surface.canvas).egui(), line: cx.color(c.overlay.line).egui(), halo: cx.color(c.overlay.halo).egui() }
+        Colors {
+            pasteboard: cx.color(c.surface.canvas).egui(),
+            line: cx.color(c.overlay.line).egui(),
+            halo: cx.color(c.overlay.halo).egui(),
+            marquee: cx.color(c.overlay.marquee).egui(),
+        }
     })
 }
 
@@ -342,6 +350,7 @@ fn seen(vp: &ViewProjection, size: photocraft_geom::Size) -> photocraft_geom::Re
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Gesture {
     Paint,
+    Select,
     Zoom,
     Look,
 }
@@ -351,6 +360,7 @@ fn gesture(tool: Tool, space: bool) -> Gesture {
         _ if space => Gesture::Look,
         Tool::Brush | Tool::Eraser | Tool::CloneStamp | Tool::Healing | Tool::SpotHealing => Gesture::Paint,
         Tool::Zoom => Gesture::Zoom,
+        t if super::view360_select::supported(t) => Gesture::Select,
         _ => Gesture::Look,
     }
 }
@@ -406,7 +416,7 @@ pub(crate) fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui, host: CanvasHost,
     if response.has_focus() {
         look_keys(&ctx, &mut look);
     }
-    let painting = gesture == Gesture::Paint && active;
+    let painting = matches!(gesture, Gesture::Paint | Gesture::Select) && active;
     let looks = response.dragged_by(PointerButton::Middle) || (response.dragged_by(PointerButton::Primary) && !painting);
     let grabbed = host.canvas_id().with("360-grab");
     if looks {
@@ -481,7 +491,11 @@ pub(crate) fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui, host: CanvasHost,
         });
     }
 
-    if painting {
+    let pass = super::view360_select::Pass { rect, ppp, look: &look, vp: &vp };
+    super::view360_select::ants(app, &ctx, &painter, host.canvas_id(), idx, &pass);
+    if painting && gesture == Gesture::Select {
+        super::view360_select::tool(app, &ctx, &response, &painter, host.canvas_id(), &pass);
+    } else if painting {
         look = paint(app, &ctx, &response, &painter, &Frame { rect, look, vp, doc: doc.id });
     } else if response.hovered() {
         ctx.set_cursor_icon(match gesture {

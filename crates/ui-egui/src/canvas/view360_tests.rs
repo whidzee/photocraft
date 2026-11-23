@@ -335,3 +335,65 @@ fn spot_healing_takes_out_a_spot() {
 fn button_held(at: Pos2, pressed: bool, modifiers: Modifiers) -> Event {
     Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers }
 }
+
+/// Whether the latlong pixel `(u, v)` is selected.
+fn selected(app: &PhotocraftApp, [u, v]: [f64; 2]) -> bool {
+    let st = &app.session.documents()[0];
+    st.doc.selection.as_ref().is_some_and(|m| {
+        let mut px = vec![0f32; m.channels()];
+        m.read_pixel(u as i32, v as i32, &mut px);
+        px[0] >= 0.5
+    })
+}
+
+/// A marquee drawn in the view selects the latlong pixels it covers there, in one History step, and its ants show.
+#[test]
+fn a_marquee_in_the_view_selects_what_it_covers() {
+    let mut app = app(800, 400, Tool::RectMarquee);
+    let steps = app.session.documents()[0].history.past_len();
+    let (a, b) = (pos2(150.0, 100.0), pos2(250.0, 200.0));
+    drag(&mut app, &[a, a + vec2(30.0, 30.0), b]);
+    assert_eq!(app.session.documents()[0].history.past_len(), steps + 1);
+    assert!(selected(&app, latlong_at(RECT.center())), "the middle of the marquee is selected");
+    assert!(!selected(&app, latlong_at(pos2(50.0, 150.0))), "outside it is not");
+    assert!(app.view360_ants.as_ref().is_some_and(|a| a.shows()), "the ants show");
+}
+
+/// Shift adds a second marquee to the first, as on the flat canvas.
+#[test]
+fn shift_adds_a_second_marquee() {
+    let mut app = app(800, 400, Tool::RectMarquee);
+    drag(&mut app, &[pos2(60.0, 120.0), pos2(80.0, 140.0), pos2(100.0, 180.0)]);
+    let shift = |app: &mut PhotocraftApp, events: Vec<Event>| pass_held(app, events, Modifiers::SHIFT);
+    let (a, b) = (pos2(300.0, 120.0), pos2(340.0, 180.0));
+    shift(&mut app, vec![Event::PointerMoved(a)]);
+    shift(&mut app, vec![button_held(a, true, Modifiers::SHIFT)]);
+    shift(&mut app, vec![Event::PointerMoved(a + vec2(20.0, 20.0))]);
+    shift(&mut app, vec![Event::PointerMoved(b)]);
+    shift(&mut app, vec![button_held(b, false, Modifiers::SHIFT)]);
+    assert!(selected(&app, latlong_at(pos2(80.0, 150.0))) && selected(&app, latlong_at(pos2(320.0, 150.0))));
+}
+
+/// The Magic Wand selects the colour clicked in the view.
+#[test]
+fn the_magic_wand_selects_the_spot_clicked() {
+    let mut app = app(800, 400, Tool::MagicWand);
+    let c = RECT.center();
+    spot(&mut app, latlong_at(c), "#ff0000");
+    pass(&mut app, vec![Event::PointerMoved(c)]);
+    pass(&mut app, vec![button(c, true)]);
+    pass(&mut app, vec![button(c, false)]);
+    assert!(selected(&app, latlong_at(c)) && !selected(&app, latlong_at(pos2(40.0, 40.0))));
+}
+
+/// The Patch tool: a drag inside the selection patches it from where it is dropped.
+#[test]
+fn the_patch_tool_patches_from_where_the_selection_is_dropped() {
+    let mut app = app(800, 400, Tool::Patch);
+    let c = RECT.center();
+    let at = latlong_at(c);
+    spot(&mut app, at, "#000000");
+    app.run("select.rect", json!({"x": at[0] - 14.0, "y": at[1] - 14.0, "width": 28, "height": 28})).unwrap();
+    drag(&mut app, &[c, c + vec2(20.0, 0.0), c + vec2(80.0, 0.0)]);
+    assert!(pixel(&app, at[0], at[1])[0] > 0.5, "patched from the white: {:?}", pixel(&app, at[0], at[1]));
+}

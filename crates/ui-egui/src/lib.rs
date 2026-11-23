@@ -386,6 +386,8 @@ pub struct PhotocraftApp {
     pub(crate) data_set_preview: panels::apply_data_set_ui::PreviewState,
     /// A Brush or Eraser stroke being drawn in a View › 360° View (`canvas::view360`).
     pub(crate) view360_stroke: Option<canvas::view360::Stroke360>,
+    /// The marching ants of the 360° View, cached per camera (`canvas::view360_select`).
+    pub(crate) view360_ants: Option<canvas::view360_select::Ants>,
     /// The Brush or Pencil erase key is held this frame (`hold_keys::erase_held`, #3439).
     held_erase: bool,
     /// Position and pen pressure at the last stroke's endpoint: ⇧-click interpolates from them (#178, #2827).

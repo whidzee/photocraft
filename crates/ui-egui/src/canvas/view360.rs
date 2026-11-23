@@ -8,6 +8,10 @@
 //! - Brush and Eraser strokes are drawn in the view and committed as one `paint.projectedStroke`, which reprojects
 //!   them onto the latlong pixels: one History step. The live stroke is the engine's own brush on the view
 //!   (`ProjectedPreview`).
+//! - The Clone Stamp and Healing Brush paint from the source Alt-click (Option-click) sets, kept as a direction on
+//!   the sphere: the stroke paints through a rotation of the sphere, so the source isn't distorted where it lands
+//!   (`paint.projectedClone`, `paint.projectedTool`). Aligned keeps the first stroke's rotation for later ones. The
+//!   Spot Healing Brush runs on the view too.
 //! - Other tools don't work in the view yet; pressing with one says so in the status bar and looks around.
 //! - The Navigator outlines what the view sees on the flat image; a click there looks at that spot.
 //!
@@ -25,7 +29,8 @@ use craft::ui::text::NumberField;
 use craft::ui::value_drag::Slider;
 use egui::{Color32, PointerButton, Pos2, Rect, Sense, Stroke, vec2};
 use photocraft_engine::brush_cmds::ProjectedPreview;
-use photocraft_engine::equirect::{Camera, MAX_FOV, MAX_PITCH, MIN_FOV, ViewProjection, wrap_deg};
+use photocraft_engine::equirect::{Camera, MAX_FOV, MAX_PITCH, MIN_FOV, Rot, ViewProjection, rot, rotation_between, wrap_deg};
+use photocraft_engine::projected_tool::ProjectedTool;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -49,11 +54,18 @@ pub struct SphereView {
     pub pitch: f32,
     /// The vertical field of view.
     pub fov: f32,
+    /// The Clone Stamp and Healing Brush source (Alt-click), as a direction on the sphere, so looking around keeps it.
+    #[serde(default)]
+    pub clone_source: Option<[f64; 3]>,
+    /// Aligned: the sphere rotation from destination to source the first stroke after the source was set fixed
+    /// (row-major 3×3).
+    #[serde(default)]
+    pub clone_rotation: Option<[f64; 9]>,
 }
 
 impl Default for SphereView {
     fn default() -> Self {
-        SphereView { yaw: 0.0, pitch: 0.0, fov: DEFAULT_FOV }
+        SphereView { yaw: 0.0, pitch: 0.0, fov: DEFAULT_FOV, clone_source: None, clone_rotation: None }
     }
 }
 
@@ -66,7 +78,7 @@ impl SphereView {
     /// This camera with its yaw wrapped and its pitch and field of view in range.
     fn clamped(self) -> Self {
         let c = self.camera();
-        SphereView { yaw: c.yaw as f32, pitch: c.pitch as f32, fov: c.fov as f32 }
+        SphereView { yaw: c.yaw as f32, pitch: c.pitch as f32, fov: c.fov as f32, ..self }
     }
 
     /// Turn Camera: a pointer drag of `d` points over a view `h` points tall turns the view the way the pointer
@@ -196,9 +208,13 @@ pub(crate) fn command(app: &mut PhotocraftApp, p: &Value) -> Result<Value, Strin
 /// points so far (view device pixels and pressure) and the engine's live preview of them.
 pub(crate) struct Stroke360 {
     doc: DocId,
+    /// The command that commits it: `paint.projectedStroke`, `paint.projectedClone` or `paint.projectedTool`.
+    command: &'static str,
     params: Value,
+    /// The Clone Stamp or Healing Brush source rotation it paints through.
+    rotation: Option<Rot>,
     points: Vec<[f64; 3]>,
-    preview: ProjectedPreview,
+    preview: Preview,
     texture: Option<egui::TextureHandle>,
     /// The view device pixels the texture covers.
     shown: Option<photocraft_geom::Rect>,
@@ -214,12 +230,17 @@ impl Stroke360 {
     /// Renders the points that arrived since the last render, and draws the stroke so far over `rect`.
     fn draw(&mut self, ctx: &egui::Context, painter: &egui::Painter, rect: Rect, ppp: f32) {
         let now = ctx.input(|i| i.time);
-        let wait = if self.cost > 0.04 { self.cost } else { 0.0 };
+        // A retouch tool re-runs on the whole view: at most every 50 ms.
+        let floor = if matches!(self.preview, Preview::Tool(_)) { 0.05 } else { 0.0 };
+        let wait = if self.cost > 0.04 { self.cost.max(floor) } else { floor };
         if self.rendered != self.points.len() && now - self.last >= wait {
             self.rendered = self.points.len();
             self.last = now;
             let started = crate::gpu_canvas::now_ms();
-            let overlay = self.preview.render(&self.points);
+            let overlay = match &mut self.preview {
+                Preview::Stroke(p) => p.render(&self.points),
+                Preview::Tool(t) => t.preview(&self.points),
+            };
             self.cost = (crate::gpu_canvas::now_ms() - started) / 1000.0;
             if let Some(o) = overlay {
                 let size = [o.rect.width() as usize, o.rect.height() as usize];
@@ -239,6 +260,14 @@ impl Stroke360 {
             painter.image(t.id(), at, Rect::from_min_max(Pos2::ZERO, egui::pos2(1.0, 1.0)), Color32::WHITE);
         }
     }
+}
+
+/// What shows a stroke while it is drawn.
+enum Preview {
+    /// Brush, Eraser, Clone Stamp: the brush engine on the view.
+    Stroke(ProjectedPreview),
+    /// Healing Brush and Spot Healing Brush: the flat tool re-run on the resampled view.
+    Tool(Box<ProjectedTool>),
 }
 
 /// The theme colours the view draws with.
@@ -293,7 +322,7 @@ fn look_keys(ctx: &egui::Context, look: &mut SphereView) {
             }
         }
         if i.consume_key(egui::Modifiers::NONE, Key::Home) {
-            *look = SphereView::default();
+            *look = SphereView { clone_source: look.clone_source, clone_rotation: look.clone_rotation, ..SphereView::default() };
         }
     });
 }
@@ -320,7 +349,7 @@ enum Gesture {
 fn gesture(tool: Tool, space: bool) -> Gesture {
     match tool {
         _ if space => Gesture::Look,
-        Tool::Brush | Tool::Eraser => Gesture::Paint,
+        Tool::Brush | Tool::Eraser | Tool::CloneStamp | Tool::Healing | Tool::SpotHealing => Gesture::Paint,
         Tool::Zoom => Gesture::Zoom,
         _ => Gesture::Look,
     }
@@ -420,7 +449,7 @@ pub(crate) fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui, host: CanvasHost,
             crate::i18n::fmt(tl!("{tool} doesn't work in 360° View yet, so dragging looks around. Turn off View › 360° View to use it."), &[("tool", &name)]);
         app.ui.status_error = false;
     }
-    let look = look.clamped();
+    let mut look = look.clamped();
     let vp = ViewProjection::new(look.camera(), w_px, h_px);
 
     // The picture.
@@ -453,7 +482,7 @@ pub(crate) fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui, host: CanvasHost,
     }
 
     if painting {
-        paint(app, &ctx, &response, &painter, &Frame { rect, look, vp, doc: doc.id });
+        look = paint(app, &ctx, &response, &painter, &Frame { rect, look, vp, doc: doc.id });
     } else if response.hovered() {
         ctx.set_cursor_icon(match gesture {
             Gesture::Zoom if ctx.input(|i| i.modifiers.alt) => egui::CursorIcon::ZoomOut,
@@ -483,25 +512,100 @@ struct Frame {
     doc: DocId,
 }
 
-/// A Brush or Eraser stroke in the view: started on a press, extended as the pointer moves, shown with the engine's
-/// brush and committed on release as `paint.projectedStroke`. The brush outline follows the pointer.
-fn paint(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Response, painter: &egui::Painter, frame: &Frame) {
+/// A stroke of the painting tools in the view: started on a press, extended as the pointer moves, shown live and
+/// committed on release as one History step. Brush and Eraser commit `paint.projectedStroke`; the Clone Stamp
+/// `paint.projectedClone`; the Healing Brush and Spot Healing Brush `paint.projectedTool`. The Clone Stamp and
+/// Healing Brush paint from the source Alt-click set, through a rotation of the sphere, so the source isn't
+/// distorted where it lands. The brush outline follows the pointer. Returns the camera with any new source.
+fn paint(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Response, painter: &egui::Painter, frame: &Frame) -> SphereView {
     let Frame { rect, look, vp, doc } = frame;
-    let (rect, doc) = (*rect, *doc);
+    let (rect, doc, mut look) = (*rect, *doc, *look);
     let ppp = ctx.pixels_per_point();
     let to_view = |p: Pos2| -> [f64; 2] { [f64::from((p.x - rect.min.x) * ppp), f64::from((p.y - rect.min.y) * ppp)] };
     let pressure = f64::from(app.stylus.pressure());
+    let tool = app.ui.tool;
+    let sources = matches!(tool, Tool::CloneStamp | Tool::Healing);
+    let colors = colors(ctx);
+    if sources && ctx.input(|i| i.modifiers.alt) {
+        // Alt-click (or press) sets the source: a direction, so looking around keeps it.
+        if (response.clicked() || response.drag_started())
+            && let Some(p) = response.interact_pointer_pos()
+        {
+            let [x, y] = to_view(p);
+            look.clone_source = Some(vp.view_to_dir(x, y));
+            look.clone_rotation = None;
+            app.ui.status = tl!("Source set").to_string();
+            app.ui.status_error = false;
+        }
+        if let Some(h) = response.hover_pos().filter(|_| response.hovered()) {
+            crosshair(painter, h, &colors);
+            ctx.set_cursor_icon(egui::CursorIcon::None);
+        }
+        return look;
+    }
+    let projection = json!({"yaw": look.yaw, "pitch": look.pitch, "fov": look.fov, "width": vp.w, "height": vp.h});
     let start = |app: &mut PhotocraftApp, at: [f64; 2]| -> Option<Stroke360> {
-        let params = json!({
-            "erase": app.ui.tool == Tool::Eraser,
-            "zoom": 1.0,
-            "target": crate::canvas::paint_target(app),
-            "projection": {"yaw": look.yaw, "pitch": look.pitch, "fov": look.fov, "width": vp.w, "height": vp.h},
-        });
-        match ProjectedPreview::brush(&app.session, &params) {
+        let target = crate::canvas::paint_target(app);
+        let o = &app.ui.tool_options;
+        // The Clone Stamp and Healing Brush source rotation: the aligned one an earlier stroke fixed, else from here
+        // to the source.
+        let rotation = if sources {
+            let Some(source) = look.clone_source else {
+                app.ui.status =
+                    if cfg!(target_os = "macos") { tl!("Option-click to set a source to paint from") } else { tl!("Alt-click to set a source to paint from") }
+                        .to_string();
+                app.ui.status_error = true;
+                return None;
+            };
+            Some(match look.clone_rotation.filter(|_| o.clone_aligned) {
+                Some(q) => unflat(&q),
+                None => rotation_between(vp.view_to_dir(at[0], at[1]), source),
+            })
+        } else {
+            None
+        };
+        let (command, params) = match tool {
+            Tool::CloneStamp => (
+                "paint.projectedClone",
+                json!({
+                    "rotation": rotation.map(|q| q.concat()),
+                    "sampleLayer": o.clone_sample,
+                    "opacity": app.session.tools.brush.opacity * 100.0,
+                    "flow": app.session.tools.brush.flow * 100.0,
+                    "target": target,
+                    "projection": projection,
+                }),
+            ),
+            Tool::Healing => (
+                "paint.projectedTool",
+                json!({
+                    "command": "paint.healingBrush",
+                    "params": {"aligned": o.clone_aligned, "sampleLayer": o.clone_sample, "target": target},
+                    "rotation": rotation.map(|q| q.concat()),
+                    "projection": projection,
+                }),
+            ),
+            Tool::SpotHealing => (
+                "paint.projectedTool",
+                json!({
+                    "command": "paint.spotHealing",
+                    "params": {"type": o.spot_type, "sampleAllLayers": o.sample_all.get(tool), "target": target},
+                    "projection": projection,
+                }),
+            ),
+            _ => ("paint.projectedStroke", json!({"erase": tool == Tool::Eraser, "zoom": 1.0, "target": target, "projection": projection})),
+        };
+        let preview = match command {
+            "paint.projectedTool" => ProjectedTool::new(&app.session, &params).map(|t| Preview::Tool(Box::new(t))),
+            "paint.projectedClone" => photocraft_engine::retouch_cmds::projected_clone_preview(&app.session, &params).map(Preview::Stroke),
+            _ => ProjectedPreview::brush(&app.session, &params).map(Preview::Stroke),
+        };
+        match preview {
             Ok(preview) => Some(Stroke360 {
                 doc,
+                command,
                 params,
+                rotation,
                 points: vec![[at[0], at[1], pressure]],
                 preview,
                 texture: None,
@@ -546,17 +650,60 @@ fn paint(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Response
         stroke.draw(ctx, painter, rect, ppp);
         let mut params = stroke.params;
         params["points"] = json!(stroke.points);
-        if let Err(e) = app.run("paint.projectedStroke", params) {
-            app.ui.status = e;
-            app.ui.status_error = true;
+        match app.run(stroke.command, params) {
+            // Aligned: later strokes keep this stroke's offset on the sphere.
+            Ok(_) if sources => look.clone_rotation = stroke.rotation.filter(|_| app.ui.tool_options.clone_aligned).map(|q| flat(&q)),
+            Ok(_) => {}
+            Err(e) => {
+                app.ui.status = e;
+                app.ui.status_error = true;
+            }
+        }
+    }
+    // Where the source is: under the pointer's stroke, through its rotation.
+    if sources && let Some(source) = look.clone_source {
+        let live = app.view360_stroke.as_ref().filter(|s| s.doc == doc);
+        let at = live.and_then(|s| s.points.last().map(|q| [q[0], q[1]])).or_else(|| response.hover_pos().map(to_view));
+        let q = live.and_then(|s| s.rotation).or_else(|| {
+            let q = look.clone_rotation.filter(|_| app.ui.tool_options.clone_aligned)?;
+            Some(unflat(&q))
+        });
+        let shown = match (at, q) {
+            (Some(a), Some(q)) => vp.dir_to_view(rot(&q, vp.view_to_dir(a[0], a[1]))),
+            _ => vp.dir_to_view(source),
+        };
+        if let Some([x, y]) = shown {
+            let p = rect.min + vec2(x as f32, y as f32) / ppp;
+            if rect.contains(p) {
+                crosshair(painter, p, &colors);
+            }
         }
     }
     if let Some(h) = response.hover_pos().filter(|_| response.hovered()) {
-        let colors = colors(ctx);
         let r = (app.session.tools.brush.size / ppp / 2.0).max(1.0);
         painter.circle_stroke(h, r + 1.0, Stroke::new(1.0, colors.halo));
         painter.circle_stroke(h, r, Stroke::new(1.0, colors.line));
         ctx.set_cursor_icon(egui::CursorIcon::None);
+    }
+    look
+}
+
+/// A sphere rotation as the 9 numbers a camera keeps, row by row.
+fn flat(q: &Rot) -> [f64; 9] {
+    [q[0][0], q[0][1], q[0][2], q[1][0], q[1][1], q[1][2], q[2][0], q[2][1], q[2][2]]
+}
+
+/// The rotation [`flat`] kept.
+fn unflat(q: &[f64; 9]) -> Rot {
+    [[q[0], q[1], q[2]], [q[3], q[4], q[5]], [q[6], q[7], q[8]]]
+}
+
+/// A small cross at `p`, over a halo so it reads on any image.
+fn crosshair(painter: &egui::Painter, p: Pos2, colors: &Colors) {
+    for (width, color) in [(3.0, colors.halo), (1.0, colors.line)] {
+        let s = Stroke::new(width, color);
+        painter.line_segment([p - vec2(7.0, 0.0), p + vec2(7.0, 0.0)], s);
+        painter.line_segment([p - vec2(0.0, 7.0), p + vec2(0.0, 7.0)], s);
     }
 }
 

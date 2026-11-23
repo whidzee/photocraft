@@ -35,6 +35,8 @@ pub use pattern_stamp::{
     INDEXED_REFUSAL as PATTERN_STAMP_INDEXED_REFUSAL, live_impressionist as live_pattern_impressionist, press_refusal as pattern_stamp_press_refusal,
 };
 mod periodic;
+mod projected_clone;
+pub use projected_clone::projected_clone_preview;
 mod remove;
 pub use content_aware_move::{ContentAwarePreview, preview as content_aware_move_preview};
 pub use patch::preview as patch_preview;
@@ -245,10 +247,12 @@ pub(crate) use dab::DabEffect;
 use dab::DabTool;
 pub use dab::LiveDab;
 use dab::dab_cmd;
+pub(crate) use heal::history_source;
 #[cfg(test)]
 use heal::proximity_source_patch;
-use heal::{heal_region, healing_brush, history_brush, history_source, spot_healing};
+use heal::{heal_region, healing_brush, history_brush, spot_healing};
 use sampling::sample;
+pub(super) use sampling::sample_layers;
 pub(crate) use sampling::{SampleLayers, composite_region};
 
 /// Retouching command specs.
@@ -264,6 +268,18 @@ pub fn specs() -> Vec<CommandSpec> {
             ),
             enabled: has_pixel_layer,
             run: clone_stamp,
+            journal: true,
+        },
+        CommandSpec {
+            id: "paint.projectedClone",
+            label: "Clone Stamp",
+            menu: &[],
+            shortcut: None,
+            params: brush_params!(
+                r#","rotation":[9 numbers, row-major 3×3: destination direction d samples rotation·d],"projection":{"yaw","pitch","fov","width","height"},"sampleLayer":"current|currentAndBelow|all"="current","mode":"normal|multiply|…"="normal" — View › 360° View: points and size in view pixels → {"damage"}"#
+            ),
+            enabled: has_pixel_layer,
+            run: projected_clone::projected_clone,
             journal: true,
         },
         CommandSpec {

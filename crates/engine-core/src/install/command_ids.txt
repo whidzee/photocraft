@@ -42,6 +42,7 @@ image.imageRotation.90ccw
 image.adjustments.desaturate
 paint.stroke
 paint.projectedStroke
+paint.projectedTool
 tools.setColors
 tools.swapColors
 tools.defaultColors
@@ -394,6 +395,7 @@ swatches.reset
 swatches.import
 swatches.export
 paint.cloneStamp
+paint.projectedClone
 paint.patternStamp
 paint.healingBrush
 paint.spotHealing

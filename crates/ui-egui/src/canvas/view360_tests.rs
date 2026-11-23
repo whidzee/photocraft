@@ -18,7 +18,13 @@ const RECT: Rect = Rect { min: Pos2::ZERO, max: pos2(400.0, 300.0) };
 
 /// Runs one pass of the document's canvas with `events`.
 fn pass(app: &mut PhotocraftApp, events: Vec<Event>) {
+    pass_held(app, events, Modifiers::NONE);
+}
+
+/// [`pass`] with `modifiers` held.
+fn pass_held(app: &mut PhotocraftApp, mut events: Vec<Event>, modifiers: Modifiers) {
     let ctx = app.ctx().clone();
+    events.insert(0, Event::ModifiersChanged(modifiers));
     let input = egui::RawInput { screen_rect: Some(RECT), events, ..Default::default() };
     let mut out = ctx.run_ui(input, |ui| {
         let view = app.ui.views[0].clone();
@@ -169,9 +175,17 @@ fn angle(a: [f64; 3], b: [f64; 3]) -> f64 {
 fn hold_puts_the_direction_under_the_pixel() {
     let size = [f64::from(RECT.width()), f64::from(RECT.height())];
     for (start, dir_look, at) in [
-        (SphereView::default(), SphereView { yaw: 40.0, pitch: 20.0, fov: 90.0 }, pos2(320.0, 60.0)),
-        (SphereView { yaw: 170.0, pitch: -30.0, fov: 120.0 }, SphereView { yaw: -170.0, pitch: -10.0, fov: 120.0 }, pos2(20.0, 250.0)),
-        (SphereView { yaw: 0.0, pitch: 0.0, fov: 30.0 }, SphereView { yaw: 5.0, pitch: 3.0, fov: 30.0 }, pos2(200.0, 150.0)),
+        (SphereView::default(), SphereView { yaw: 40.0, pitch: 20.0, fov: 90.0, ..SphereView::default() }, pos2(320.0, 60.0)),
+        (
+            SphereView { yaw: 170.0, pitch: -30.0, fov: 120.0, ..SphereView::default() },
+            SphereView { yaw: -170.0, pitch: -10.0, fov: 120.0, ..SphereView::default() },
+            pos2(20.0, 250.0),
+        ),
+        (
+            SphereView { yaw: 0.0, pitch: 0.0, fov: 30.0, ..SphereView::default() },
+            SphereView { yaw: 5.0, pitch: 3.0, fov: 30.0, ..SphereView::default() },
+            pos2(200.0, 150.0),
+        ),
     ] {
         let dir = dir_at(&dir_look, RECT.center());
         let mut l = start;
@@ -251,4 +265,73 @@ fn a_grab_drag_stays_on_the_near_pitch() {
         assert!((l.pitch - last).abs() < 15.0, "pitch jumped {last} → {}", l.pitch);
         last = l.pitch;
     }
+}
+
+/// The active layer's pixel at latlong `(u, v)`.
+fn pixel(app: &PhotocraftApp, u: f64, v: f64) -> [f32; 4] {
+    let st = &app.session.documents()[0];
+    st.doc.layer(st.active_layer().unwrap()).unwrap().surface().unwrap().rgba(u as i32, v as i32)
+}
+
+/// The latlong pixel the starting camera shows at view point `at`.
+fn latlong_at(at: Pos2) -> [f64; 2] {
+    ViewProjection::new(SphereView::default().camera(), f64::from(RECT.width()), f64::from(RECT.height())).view_to_equirect(
+        f64::from(at.x),
+        f64::from(at.y),
+        800.0,
+        400.0,
+    )
+}
+
+/// Fills a 24 px square of the latlong around `(u, v)` with `color`.
+fn spot(app: &mut PhotocraftApp, [u, v]: [f64; 2], color: &str) {
+    app.run("select.rect", json!({"x": u - 12.0, "y": v - 12.0, "width": 24, "height": 24})).unwrap();
+    app.run("edit.fill", json!({"color": color})).unwrap();
+    app.run("select.deselect", json!({})).unwrap();
+}
+
+/// The Clone Stamp paints from the source Alt-click set: the red under the source lands under the stroke.
+#[test]
+fn the_clone_stamp_paints_from_the_alt_click_source() {
+    let mut app = app(800, 400, Tool::CloneStamp);
+    app.session.tools.brush.size = 16.0;
+    let (source, dest) = (pos2(300.0, 150.0), pos2(110.0, 150.0));
+    spot(&mut app, latlong_at(source), "#ff0000");
+    let [u, v] = latlong_at(dest);
+    assert!(pixel(&app, u, v)[1] > 0.9, "white before");
+    pass(&mut app, vec![Event::PointerMoved(source)]);
+    pass_held(&mut app, vec![button_held(source, true, Modifiers::ALT)], Modifiers::ALT);
+    pass_held(&mut app, vec![button_held(source, false, Modifiers::ALT)], Modifiers::ALT);
+    assert!(look(&app).clone_source.is_some(), "the source is set");
+    drag(&mut app, &[dest, dest + vec2(4.0, 0.0), dest + vec2(8.0, 0.0)]);
+    let c = pixel(&app, u, v);
+    assert!(c[0] > 0.9 && c[1] < 0.2, "cloned red: {c:?}");
+}
+
+/// The Healing Brush without a source says so and paints nothing.
+#[test]
+fn healing_without_a_source_says_so() {
+    let mut app = app(800, 400, Tool::Healing);
+    let steps = app.session.documents()[0].history.past_len();
+    let c = RECT.center();
+    drag(&mut app, &[c, c + vec2(10.0, 0.0), c + vec2(20.0, 0.0)]);
+    assert_eq!(app.session.documents()[0].history.past_len(), steps);
+    assert!(app.ui.status_error && app.ui.status.contains("source"), "{}", app.ui.status);
+}
+
+/// The Spot Healing Brush in the view takes out a dark spot on the latlong.
+#[test]
+fn spot_healing_takes_out_a_spot() {
+    let mut app = app(800, 400, Tool::SpotHealing);
+    app.session.tools.brush.size = 60.0;
+    let c = RECT.center();
+    let at = latlong_at(c);
+    spot(&mut app, at, "#000000");
+    assert!(pixel(&app, at[0], at[1])[0] < 0.1);
+    drag(&mut app, &[c, c + vec2(2.0, 0.0), c + vec2(4.0, 0.0)]);
+    assert!(pixel(&app, at[0], at[1])[0] > 0.5, "healed: {:?}", pixel(&app, at[0], at[1]));
+}
+
+fn button_held(at: Pos2, pressed: bool, modifiers: Modifiers) -> Event {
+    Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers }
 }

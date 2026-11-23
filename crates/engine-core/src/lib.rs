@@ -43,6 +43,7 @@ mod pixels;
 pub mod prefs;
 pub mod preset_store;
 pub mod presets;
+pub mod projected_tool;
 pub mod proof_sim;
 mod scratch;
 pub mod select_mask_edits;

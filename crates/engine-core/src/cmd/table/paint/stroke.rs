@@ -21,5 +21,14 @@ pub fn specs() -> Vec<CommandSpec> {
             has_paintable,
             crate::brush_cmds::paint_projected_stroke
         ),
+        cmd!(
+            "paint.projectedTool",
+            "Projected Tool Stroke",
+            [],
+            None,
+            r##"{"command":"paint.healingBrush|paint.spotHealing|paint.patch","params":{…that command's params, without points…},"points":[[x,y,pressure],…] (view px),"rotation":[9 numbers]? (Healing/Patch: destination→source on the sphere),"projection":{"yaw","pitch","fov","width","height"}} — View › 360° View: a retouch tool stroke drawn in the perspective view, reprojected onto the equirect pixels"##,
+            has_paintable,
+            crate::projected_tool::projected_tool
+        ),
     ]
 }

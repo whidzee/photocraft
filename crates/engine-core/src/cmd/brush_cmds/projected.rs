@@ -201,14 +201,24 @@ pub(crate) fn write_back(
 
 /// What a live projected stroke paints with.
 pub(crate) enum PreviewKind {
-    Brush { brush: Box<photocraft_paint::BrushSettings>, lock: bool },
+    Brush {
+        brush: Box<photocraft_paint::BrushSettings>,
+        lock: bool,
+    },
+    /// The Clone Stamp: the rotated source in view space, painted through the stroke coverage.
+    Clone {
+        source: Surface,
+        brush: Box<photocraft_paint::BrushSettings>,
+        mode: photocraft_color::BlendMode,
+        lock: bool,
+    },
 }
 
 /// A projected stroke shown while it is drawn (View › 360° View): the
 /// target resampled into the whole view once, then every update renders the stroke so far with
-/// the real brush engine on a copy, and hands back an
+/// the real brush engine (or the Clone Stamp's coverage and source) on a copy, and hands back an
 /// RGBA8 overlay of what changed. Only view-sized buffers are touched, whatever the document
-/// size; the commit (`paint.projectedStroke`) reprojects on release.
+/// size; the commit (`paint.projectedStroke` / `paint.projectedClone`) reprojects on release.
 pub struct ProjectedPreview {
     pre: Surface,
     view: Rect,
@@ -240,6 +250,10 @@ impl ProjectedPreview {
         Ok(Self { pre: to_view(surf, &proj, view, iw, ih), view, sel, kind: PreviewKind::Brush { brush: Box::new(brush), lock } })
     }
 
+    pub(crate) fn with(pre: Surface, view: Rect, sel: Option<Surface>, kind: PreviewKind) -> Self {
+        Self { pre, view, sel, kind }
+    }
+
     /// Render `points` (view pixels, `[x, y, pressure]`). `None` when nothing shows yet or the
     /// target isn't RGB/gray.
     pub fn render(&self, points: &[[f64; 3]]) -> Option<PreviewOverlay> {
@@ -250,6 +264,17 @@ impl ProjectedPreview {
         let mut post = self.pre.clone();
         let damage = match &self.kind {
             PreviewKind::Brush { brush, lock } => photocraft_paint::render_stroke(&mut post, brush, &pts, self.sel.as_ref(), *lock, 1.0),
+            PreviewKind::Clone { source, brush, mode, lock } => {
+                let stroke = photocraft_paint::Stroke { brush: (**brush).clone(), points: pts };
+                let (bounds, cov) = photocraft_paint::retouch::stroke_coverage(&stroke);
+                let work = bounds.intersect(&self.view);
+                if work.is_empty() {
+                    return None;
+                }
+                let cov = crop_cov(&cov, bounds, work);
+                let paint = photocraft_paint::retouch::Region::read(source, work);
+                photocraft_paint::retouch::apply_coverage(&mut post, work, &cov, brush.opacity, self.sel.as_ref(), *lock, &paint, *mode)
+            }
         }
         .intersect(&self.view);
         if damage.is_empty() {
@@ -257,6 +282,20 @@ impl ProjectedPreview {
         }
         overlay(&self.pre, &post, damage)
     }
+}
+
+/// `cov` (row-major over `from`) cut to `to` (inside `from`).
+pub(crate) fn crop_cov(cov: &[f32], from: Rect, to: Rect) -> Vec<f32> {
+    if from == to {
+        return cov.to_vec();
+    }
+    let fw = from.width() as usize;
+    let mut out = Vec::with_capacity(to.width() as usize * to.height() as usize);
+    for y in to.y0..to.y1 {
+        let row = (y - from.y0) as usize * fw;
+        out.extend_from_slice(&cov[row + (to.x0 - from.x0) as usize..row + (to.x1 - from.x0) as usize]);
+    }
+    out
 }
 
 /// What the stroke changed over `r`, as an overlay: painted pixels as they now are (their own

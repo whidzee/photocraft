@@ -70,9 +70,10 @@ impl SphereView {
     }
 
     /// Turn Camera: a pointer drag of `d` points over a view `h` points tall turns the view the way the pointer
-    /// moves, one view height by the field of view.
+    /// moves, each point by the angle one point spans at the centre of the view.
     pub fn steer(&mut self, d: egui::Vec2, h: f32) {
-        let k = self.fov / h.max(1.0);
+        // As Panosphere: the view-plane width of one point at the centre, as an angle.
+        let k = (2.0 * (self.fov.to_radians() / 2.0).tan() / h.max(1.0)).to_degrees();
         self.turn(d.x * k, -d.y * k);
     }
 
@@ -88,7 +89,14 @@ impl SphereView {
         let n = (cx * cx + cy * cy + cz * cz).sqrt();
         let r = (cy * cy + cz * cz).sqrt();
         let want = (dir[1] * n / r).clamp(-1.0, 1.0);
-        let pitch = want.asin() - cy.atan2(cz);
+        // Two pitches put it there; take the one in range nearest the current pitch, so a drag never flips over.
+        let base = cy.atan2(cz);
+        let lim = MAX_PITCH.to_radians();
+        let now = f64::from(self.pitch).to_radians();
+        let wrap = |t: f64| t.sin().atan2(t.cos());
+        let cost = |t: f64| (t.clamp(-lim, lim) - t).abs() * 10.0 + (t.clamp(-lim, lim) - now).abs();
+        let (a, b) = (wrap(want.asin() - base), wrap(std::f64::consts::PI - want.asin() - base));
+        let pitch = if cost(a) <= cost(b) { a } else { b }.clamp(-lim, lim);
         let a = cz * pitch.cos() - cy * pitch.sin();
         let yaw = dir[0].atan2(dir[2]) - cx.atan2(a);
         self.yaw = wrap_deg(yaw.to_degrees()) as f32;
@@ -389,7 +397,10 @@ pub(crate) fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui, host: CanvasHost,
                 }
             }
         }
-    } else {
+    }
+    // The grabbed spot lasts until the button is let go, not just while a pass reports the drag: egui can run a pass
+    // between moves that doesn't, and grabbing again from the turned view would add the whole drag again each move.
+    if !ctx.input(|i| i.pointer.any_down()) {
         ctx.data_mut(|d| d.remove::<[f64; 3]>(grabbed));
     }
     if gesture == Gesture::Zoom
@@ -618,23 +629,30 @@ pub(crate) fn navigator(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize) 
     let readout = look.readout();
     let name = crate::i18n::fmt(tl!("Navigator, 360° View, {readout}"), &[("readout", &readout)]);
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Canvas, true, &name));
-    // The camera typed or slid, through the view's own command.
-    let (mut yaw, mut pitch, mut fov) = (f64::from(look.yaw), f64::from(look.pitch), f64::from(look.fov));
-    Slider::new(Bind::bound(&mut fov), MIN_FOV..=MAX_FOV).step(0.5).label(tl!("Field of view")).show(ui);
-    for (name, value, range) in
-        [(tl!("Yaw"), &mut yaw, -180.0..=180.0), (tl!("Pitch"), &mut pitch, -MAX_PITCH..=MAX_PITCH), (tl!("Field of view"), &mut fov, MIN_FOV..=MAX_FOV)]
-    {
+    // The camera typed or slid, through the view's own command. Only a value the user edited this pass is taken:
+    // the fields round what they show (yaw to a whole degree), so taking every pass's value would snap the camera
+    // to the rounding while it is dragged, and jitter.
+    let mut fov = f64::from(look.fov);
+    if !Slider::new(Bind::bound(&mut fov), MIN_FOV..=MAX_FOV).step(0.5).label(tl!("Field of view")).show(ui).events.is_empty() {
+        look.fov = fov as f32;
+    }
+    let fields: [(&str, f32, std::ops::RangeInclusive<f64>); 3] =
+        [(tl!("Yaw"), look.yaw, -180.0..=180.0), (tl!("Pitch"), look.pitch, -MAX_PITCH..=MAX_PITCH), (tl!("Field of view"), look.fov, MIN_FOV..=MAX_FOV)];
+    let mut typed = [None; 3];
+    for (slot, (name, value, range)) in typed.iter_mut().zip(fields) {
         ui.horizontal(|ui| {
             Text::new(name).show(ui);
-            let mut field = Some(*value);
-            NumberField::new(name, Bind::bound(&mut field)).range(range).show(ui);
-            if let Some(v) = field.filter(|v| v.is_finite()) {
-                *value = v;
+            let mut field = Some(f64::from(value));
+            let out = NumberField::new(name, Bind::bound(&mut field)).range(range).show(ui);
+            if !out.edit.events.is_empty() {
+                *slot = field.filter(|v| v.is_finite()).map(|v| v as f32);
             }
         });
     }
-    let typed = SphereView { yaw: yaw as f32, pitch: pitch as f32, fov: fov as f32 };
-    let look = if typed != look { typed } else { look };
+    let [yaw, pitch, fov] = typed;
+    look.yaw = yaw.unwrap_or(look.yaw);
+    look.pitch = pitch.unwrap_or(look.pitch);
+    look.fov = fov.unwrap_or(look.fov);
     if Some(look) != app.ui.views.get(idx).and_then(|v| v.projection) {
         let _ = command(app, &json!({"on": true, "yaw": look.yaw, "pitch": look.pitch, "fov": look.fov}));
     }

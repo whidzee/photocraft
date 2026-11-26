@@ -221,3 +221,34 @@ fn the_wheel_zooms_about_the_pointer() {
     assert!(look(&app).fov < fov);
     assert!(angle(dir_at(&look(&app), at), before) < 0.1, "{}°", angle(dir_at(&look(&app), at), before));
 }
+
+/// Showing the Navigator leaves a camera it wasn't asked to change alone, even between its fields' rounding: writing
+/// what the fields show back every pass would make the view jump while it is dragged.
+#[test]
+fn the_navigator_leaves_an_untouched_camera_alone() {
+    let mut app = app(800, 400, Tool::Hand);
+    command(&mut app, &json!({"yaw": 12.37, "pitch": -3.81, "fov": 63.3})).unwrap();
+    let before = look(&app);
+    let ctx = app.ctx().clone();
+    for _ in 0..3 {
+        let input = egui::RawInput { screen_rect: Some(RECT), ..Default::default() };
+        let mut out = ctx.run_ui(input, |ui| navigator(&mut app, ui, 0));
+        out.textures_delta.clear();
+    }
+    assert_eq!(look(&app), before);
+}
+
+/// Grab Image never flips the camera over: a long drag downward from a view looking well up stops at the pitch limit
+/// and keeps the image upright, rather than jumping to the other solution.
+#[test]
+fn a_grab_drag_stays_on_the_near_pitch() {
+    let size = [f64::from(RECT.width()), f64::from(RECT.height())];
+    let mut l = SphereView { pitch: 60.0, ..SphereView::default() };
+    let dir = dir_at(&l, pos2(200.0, 100.0));
+    let mut last = l.pitch;
+    for y in (100..=290).step_by(10) {
+        l.hold(dir, [200.0, f64::from(y)], size);
+        assert!((l.pitch - last).abs() < 15.0, "pitch jumped {last} → {}", l.pitch);
+        last = l.pitch;
+    }
+}

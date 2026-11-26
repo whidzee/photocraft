@@ -67,6 +67,8 @@ pub mod tool_feedback;
 pub(crate) mod tools;
 mod transform_controls;
 pub(crate) mod view360;
+#[cfg(test)]
+mod view360_drag_tests;
 pub(crate) mod viewport_pages;
 
 pub(crate) use cursor_policy::alt_samples;
@@ -200,10 +202,14 @@ pub fn canvas_view(
     let aspect = sync_view_to_document(app, &mut view, &doc);
     // View › 360° View draws and takes input on its own.
     if view.projection.is_some() {
+        let started = view.projection;
         let view = view360::show(app, ui, host, rect, view, output);
-        // The primary canvas's camera is the document's own: the next pass starts from it.
+        // The primary canvas's camera is the document's own: the next pass starts from it. Only a camera this pass
+        // moved is written, so a Navigator change made since the pass began isn't put back.
         if let Some(stored) = (primary && !own_window).then(|| app.ui.views.get_mut(idx)).flatten() {
-            stored.projection = view.projection;
+            if view.projection != started {
+                stored.projection = view.projection;
+            }
             stored.pending.clone_from(&view.pending);
         }
         return (view, None);

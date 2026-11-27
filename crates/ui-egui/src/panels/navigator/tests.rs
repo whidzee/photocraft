@@ -65,3 +65,19 @@ fn navigator_viewport_follows_the_canvas_zoom_ease() {
     h.run_steps(90);
     assert!(percents(&h).iter().any(|p| (p - 200.0).abs() < 0.5), "the ease ends on the target: {:?}", percents(&h));
 }
+
+/// The Navigator's 360° View button turns the view on and back off for a 2:1 document, and Preferences › Tools ›
+/// Show 360° View Button in Navigator hides it.
+#[test]
+fn the_navigator_button_toggles_the_360_view() {
+    let mut h = whole_app(false);
+    h.get_by_label("360° View").click();
+    h.run_steps(4);
+    assert!(crate::canvas::view360::is_on(h.state(), 0), "on after the first click");
+    h.get_by_label("360° View").click();
+    h.run_steps(4);
+    assert!(!crate::canvas::view360::is_on(h.state(), 0), "off after the second");
+    h.state_mut().run("prefs.set", json!({"path": "tools.sphereNavigatorButton", "value": false})).unwrap();
+    h.run_steps(4);
+    assert!(h.query_by_label("360° View").is_none(), "the preference hides the button");
+}

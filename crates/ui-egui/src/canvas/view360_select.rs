@@ -4,6 +4,10 @@
 //! applies, with Shift adding, Alt subtracting and both intersecting, as on the flat canvas. The marching ants are
 //! the selection resampled into the view, and the painting tools in the view are clipped by it.
 //!
+//! The Single Row and Single Column Marquee click a one-pixel line, level or upright in the view. The Polygonal and
+//! Magnetic Lasso draw freehand in the view, as the Lasso does. Quick Selection grows the selection from where its
+//! brush is dragged (Alt takes away), and Object Selection finds the object in a rectangle drawn round it.
+//!
 //! The Patch tool uses the same drawing: a drag outside the selection draws one with the Lasso, a drag inside it
 //! patches the selected area from where it is dropped.
 
@@ -19,7 +23,30 @@ use super::view360::SphereView;
 
 /// The selection tools that work in the view.
 pub(crate) fn supported(tool: Tool) -> bool {
-    matches!(tool, Tool::RectMarquee | Tool::EllipseMarquee | Tool::Lasso | Tool::MagicWand | Tool::Patch)
+    matches!(
+        tool,
+        Tool::RectMarquee
+            | Tool::EllipseMarquee
+            | Tool::SingleRowMarquee
+            | Tool::SingleColumnMarquee
+            | Tool::Lasso
+            | Tool::PolygonLasso
+            | Tool::MagneticLasso
+            | Tool::MagicWand
+            | Tool::QuickSelection
+            | Tool::ObjectSelection
+            | Tool::Patch
+    )
+}
+
+/// The tools that select with a click rather than a drawn shape.
+fn clicks(tool: Tool) -> bool {
+    matches!(tool, Tool::MagicWand | Tool::SingleRowMarquee | Tool::SingleColumnMarquee)
+}
+
+/// The tools whose shape is the rectangle from the first point to the last.
+fn boxes(tool: Tool) -> bool {
+    matches!(tool, Tool::RectMarquee | Tool::EllipseMarquee | Tool::ObjectSelection)
 }
 
 /// A selection (or a Patch move) being drawn: view device pixels.
@@ -40,11 +67,11 @@ pub(crate) struct Pass<'a> {
 }
 
 impl Pass<'_> {
-    fn to_view(&self, p: Pos2) -> [f64; 2] {
+    pub(crate) fn to_view(&self, p: Pos2) -> [f64; 2] {
         [f64::from((p.x - self.rect.min.x) * self.ppp), f64::from((p.y - self.rect.min.y) * self.ppp)]
     }
 
-    fn to_screen(&self, q: [f64; 2]) -> Pos2 {
+    pub(crate) fn to_screen(&self, q: [f64; 2]) -> Pos2 {
         self.rect.min + vec2(q[0] as f32, q[1] as f32) / self.ppp
     }
 
@@ -60,6 +87,17 @@ fn mode(app: &PhotocraftApp, tool: Tool, modifiers: egui::Modifiers) -> &'static
     crate::tool_feedback::mode_name(crate::tool_feedback::selection_op(tool, app.ui.selection_mode, mods, has))
 }
 
+/// The mode a drawn shape combines by: the Patch tool draws with the Lasso's, and Quick Selection adds to the
+/// selection (Alt takes away), as its flat brush does.
+fn shape_mode(app: &PhotocraftApp, tool: Tool, modifiers: egui::Modifiers) -> &'static str {
+    match tool {
+        Tool::Patch => mode(app, Tool::Lasso, modifiers),
+        Tool::QuickSelection if modifiers.alt => "subtract",
+        Tool::QuickSelection => "add",
+        t => mode(app, t, modifiers),
+    }
+}
+
 /// `select.projected` params for `tool` with `points` (view device pixels).
 fn params(app: &PhotocraftApp, tool: Tool, mode: &str, points: &[[f64; 2]], pass: &Pass<'_>) -> Option<Value> {
     let o = &app.ui.tool_options;
@@ -71,7 +109,7 @@ fn params(app: &PhotocraftApp, tool: Tool, mode: &str, points: &[[f64; 2]], pass
             p["rect"] = json!([a[0], a[1], b[0], b[1]]);
             p["feather"] = json!(o.feather);
         }
-        Tool::Lasso | Tool::Patch => {
+        Tool::Lasso | Tool::PolygonLasso | Tool::MagneticLasso | Tool::Patch => {
             p["kind"] = json!("lasso");
             p["points"] = json!(points);
             p["feather"] = json!(o.feather);
@@ -82,6 +120,19 @@ fn params(app: &PhotocraftApp, tool: Tool, mode: &str, points: &[[f64; 2]], pass
             p["tolerance"] = json!(o.tolerance);
             p["contiguous"] = json!(o.contiguous);
         }
+        Tool::SingleRowMarquee | Tool::SingleColumnMarquee => {
+            p["kind"] = json!(if tool == Tool::SingleRowMarquee { "row" } else { "column" });
+            p["points"] = json!([a]);
+        }
+        Tool::QuickSelection => {
+            p["kind"] = json!("quick");
+            p["points"] = json!(points);
+            p["size"] = json!(app.session.tools.brush.size);
+        }
+        Tool::ObjectSelection => {
+            p["kind"] = json!("object");
+            p["rect"] = json!([a[0].min(b[0]), a[1].min(b[1]), a[0].max(b[0]), a[1].max(b[1])]);
+        }
         _ => return None,
     }
     Some(p)
@@ -91,10 +142,9 @@ fn params(app: &PhotocraftApp, tool: Tool, mode: &str, points: &[[f64; 2]], pass
 /// flat canvas.
 fn commit(app: &mut PhotocraftApp, tool: Tool, mode: &str, points: &[[f64; 2]], pass: &Pass<'_>) {
     let small = match tool {
-        Tool::RectMarquee | Tool::EllipseMarquee => {
-            points.first().zip(points.last()).is_none_or(|(a, b)| (a[0] - b[0]).abs() < 2.0 || (a[1] - b[1]).abs() < 2.0)
-        }
-        Tool::Lasso | Tool::Patch => points.len() < 3,
+        t if boxes(t) => points.first().zip(points.last()).is_none_or(|(a, b)| (a[0] - b[0]).abs() < 2.0 || (a[1] - b[1]).abs() < 2.0),
+        Tool::Lasso | Tool::PolygonLasso | Tool::MagneticLasso | Tool::Patch => points.len() < 3,
+        Tool::QuickSelection => points.is_empty(),
         _ => false,
     };
     let r = if small {
@@ -152,8 +202,8 @@ pub(crate) fn tool(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui
         ctx.set_cursor_icon(if moving { egui::CursorIcon::Move } else { egui::CursorIcon::Crosshair });
     }
     let modifiers = ctx.input(|i| i.modifiers);
-    // The Magic Wand selects with a click.
-    if tool == Tool::MagicWand {
+    // The Magic Wand and the single-pixel marquees select with a click.
+    if clicks(tool) {
         if response.clicked_by(PointerButton::Primary)
             && let Some(p) = response.interact_pointer_pos()
         {
@@ -170,13 +220,14 @@ pub(crate) fn tool(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui
         let d = if patch {
             Drag::Patch { start: q }
         } else {
-            Drag::Shape { mode: mode(app, if tool == Tool::Patch { Tool::Lasso } else { tool }, modifiers), points: vec![q] }
+            Drag::Shape { mode: shape_mode(app, tool, modifiers), points: vec![q] }
         };
         ctx.data_mut(|x| x.insert_temp(id, d));
     } else if response.clicked_by(PointerButton::Primary) && drag.is_none() {
-        // A click with a marquee or the lasso: no shape.
-        let mode = mode(app, tool, modifiers);
-        commit(app, tool, mode, &[], pass);
+        // A Quick Selection click is one dab; a click with a marquee or a lasso has no shape.
+        let at: Vec<[f64; 2]> = response.interact_pointer_pos().filter(|_| tool == Tool::QuickSelection).map(|p| pass.to_view(p)).into_iter().collect();
+        let mode = shape_mode(app, tool, modifiers);
+        commit(app, tool, mode, &at, pass);
         return;
     }
     let Some(drag) = ctx.data(|d| d.get_temp::<Drag>(id)) else { return };
@@ -185,7 +236,7 @@ pub(crate) fn tool(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui
         Drag::Shape { mode, mut points } => {
             if let Some(q) = now {
                 match tool {
-                    Tool::RectMarquee | Tool::EllipseMarquee => {
+                    t if boxes(t) => {
                         points.truncate(1);
                         points.push(q);
                     }
@@ -249,7 +300,7 @@ fn shape_points(tool: Tool, points: &[[f64; 2]], pass: &Pass<'_>) -> Vec<Pos2> {
     let (Some(a), Some(b)) = (points.first(), points.last()) else { return Vec::new() };
     let (a, b) = (pass.to_screen(*a), pass.to_screen(*b));
     match tool {
-        Tool::RectMarquee => {
+        Tool::RectMarquee | Tool::ObjectSelection => {
             let r = Rect::from_two_pos(a, b);
             vec![r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom(), r.left_top()]
         }

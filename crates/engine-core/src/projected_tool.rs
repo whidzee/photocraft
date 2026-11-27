@@ -1,5 +1,6 @@
-//! `paint.projectedTool`: a flat-canvas retouch tool (Healing Brush, Spot Healing Brush, Patch) in
-//! View › 360° View (#15726).
+//! `paint.projectedTool`: a flat-canvas painting or retouch tool (the Healing Brush, Spot Healing
+//! Brush and Patch, the Pencil, Mixer Brush, Color Replacement, History Brush, Pattern Stamp,
+//! Background Eraser, Remove Tool and the Blur to Sponge tools) in View › 360° View (#15726).
 //!
 //! The document is resampled into the view once — the target layer (and its mask), every pixel
 //! layer when the tool samples all layers, and the selection — as a small temporary document. The
@@ -32,6 +33,19 @@ fn label_of(cmd: &str) -> Option<&'static str> {
         "paint.healingBrush" => "Healing Brush",
         "paint.spotHealing" => "Spot Healing Brush",
         "paint.patch" => "Patch",
+        "paint.pencil" => "Pencil",
+        "paint.mixerBrush" => "Mixer Brush",
+        "paint.colorReplacement" => "Color Replacement",
+        "paint.historyBrush" => "History Brush",
+        "paint.patternStamp" => "Pattern Stamp",
+        "paint.backgroundEraser" => "Background Eraser",
+        "paint.remove" => "Remove Tool",
+        "paint.blur" => "Blur",
+        "paint.sharpen" => "Sharpen",
+        "paint.smudge" => "Smudge",
+        "paint.dodge" => "Dodge",
+        "paint.burn" => "Burn",
+        "paint.sponge" => "Sponge",
         _ => return None,
     })
 }

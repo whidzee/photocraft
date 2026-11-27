@@ -1,7 +1,8 @@
 //! View › 360° View (#15726): a latlong (2:1 equirectangular) document seen from the centre of its sphere, through a
 //! camera you look around in. Each document view keeps its own camera ([`SphereView`] in `View::projection`).
 //!
-//! - Drag to look around (the Hand tool, Space or the middle button while painting); the wheel, the Zoom tool and
+//! - Drag with the middle button, or with Space held, to look around; the Hand tool looks around with the left
+//!   button too, as it scrolls the flat canvas. The wheel, the Zoom tool and
 //!   View › Zoom In and Zoom Out narrow and widen the field of view; View › Fit on Screen goes back to 90°, 100% to
 //!   one image pixel per screen pixel at the centre. With the view focused the arrow keys look around (Shift by
 //!   10°, Alt by 0.5°) and Home looks back at the image's centre.
@@ -16,7 +17,11 @@
 //!   selection from where it is dropped (`view360_select`). The marching ants follow the camera.
 //! - The Move tool turns the layer (or the selection's contents) across the sphere; Edit › Free Transform puts a box
 //!   in the view, and Edit › Paste lands the clipboard upright where you look (`view360_xform`).
-//! - Other tools don't work in the view yet; pressing with one says so in the status bar and looks around.
+//! - The Pencil, Mixer Brush, Color Replacement, History Brush, Pattern Stamp, Background Eraser, Remove Tool and
+//!   the Blur to Sponge tools paint in the view through `paint.projectedTool`, as the Spot Healing Brush does.
+//! - The Eyedropper, Color Sampler, Count, Note, Paint Bucket, Magic Eraser and Red Eye tools act at the latlong
+//!   pixel under the click, through their flat commands; the samplers, count markers and notes show in the view.
+//! - Other tools don't work in the view yet; pressing with one says so in the status bar and does nothing else.
 //! - The Navigator outlines what the view sees on the flat image; a click there looks at that spot.
 //!
 //! The picture is the GPU canvas's `fs_proj` pass over the document's own tiles (`gpu_canvas`); the maths is
@@ -25,7 +30,7 @@
 use craft::theme::Variant;
 use craft::theme::variant::{Emphasis, Tone};
 use craft::ui::canvas::{ViewCommands, ViewRequest};
-use craft::ui::contract::{Bind, Props as _, Show as _};
+use craft::ui::contract::{Bind, Props as _, Show as _, ShowContainer as _};
 use craft::ui::display::{Badge, Text};
 use craft::ui::notices::{Notice, NoticeLayout};
 use craft::ui::style::StyleCx;
@@ -157,6 +162,22 @@ impl SphereView {
 /// Whether document `idx`'s own view shows the 360° View.
 pub(crate) fn is_on(app: &PhotocraftApp, idx: usize) -> bool {
     app.ui.views.get(idx).is_some_and(|v| v.projection.is_some())
+}
+
+/// Whether the Navigator shows the 360° View button for document `idx`: Preferences › Tools › Show 360° View
+/// Button in Navigator is on, and the document is 2:1, as a latlong is, or its view is already on.
+pub(crate) fn shows_button(app: &PhotocraftApp, idx: usize) -> bool {
+    let latlong = app.session.documents().get(idx).is_some_and(|st| st.doc.size.width == 2 * st.doc.size.height && st.doc.size.height > 0);
+    app.session.prefs().tools.sphere_navigator_button && (latlong || is_on(app, idx))
+}
+
+/// The Navigator's 360° View button: `view.view360` on the active document, shown pressed while its view is `on`.
+/// The View menu's item stays as it is.
+pub(crate) fn navigator_button(ui: &mut egui::Ui, on: bool) {
+    craft::ui::buttons::IconButton::command(craft::behavior::IconId::new("globe"), craft::keymap::CommandRef::new(COMMAND))
+        .selected(on)
+        .tooltip(tl!("360° View"))
+        .show(ui);
 }
 
 /// `view.view360`: turns the active document's 360° View on (`on: true`), off (`on: false`) or over (no `on`), and
@@ -348,25 +369,80 @@ fn seen(vp: &ViewProjection, size: photocraft_geom::Size) -> photocraft_geom::Re
     if seen.is_empty() { full } else { seen.intersect(&full) }
 }
 
-/// What a press with `tool` does in the view: paint, zoom, or look around.
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// What a left-button press with `tool` does in the view. The middle button always looks around.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Gesture {
     Paint,
     Select,
     Move,
     Zoom,
+    /// A click (the Eyedropper also a drag) at one latlong pixel.
+    Point,
     Look,
+    /// A tool the view has no use for yet: the press only says so.
+    Unsupported,
 }
 
 fn gesture(tool: Tool, space: bool) -> Gesture {
     match tool {
         _ if space => Gesture::Look,
+        Tool::Hand => Gesture::Look,
         Tool::Brush | Tool::Eraser | Tool::CloneStamp | Tool::Healing | Tool::SpotHealing => Gesture::Paint,
+        t if projects(t) => Gesture::Paint,
         Tool::Zoom => Gesture::Zoom,
         Tool::Move => Gesture::Move,
         t if super::view360_select::supported(t) => Gesture::Select,
-        _ => Gesture::Look,
+        t if points(t) => Gesture::Point,
+        _ => Gesture::Unsupported,
     }
+}
+
+/// The painting and retouch tools that run their flat command on the view through `paint.projectedTool`.
+fn projects(tool: Tool) -> bool {
+    matches!(
+        tool,
+        Tool::Pencil
+            | Tool::MixerBrush
+            | Tool::ColorReplacement
+            | Tool::HistoryBrush
+            | Tool::PatternStamp
+            | Tool::BackgroundEraser
+            | Tool::Remove
+            | Tool::Blur
+            | Tool::Sharpen
+            | Tool::Smudge
+            | Tool::Dodge
+            | Tool::Burn
+            | Tool::Sponge
+    )
+}
+
+/// The tools that act at the one latlong pixel under a click.
+fn points(tool: Tool) -> bool {
+    matches!(tool, Tool::Eyedropper | Tool::ColorSampler | Tool::Count | Tool::Note | Tool::PaintBucket | Tool::MagicEraser | Tool::RedEye)
+}
+
+/// The flat command and options-bar params (without `points`) that a [`projects`] tool runs on the view.
+fn projected(app: &PhotocraftApp, tool: Tool, first: &[[f64; 3]]) -> Option<(&'static str, Value)> {
+    let o = &app.ui.tool_options;
+    let (command, mut p) = match tool {
+        Tool::Pencil => ("paint.pencil", json!({"zoom": 1.0, "autoErase": o.pencil_auto_erase})),
+        Tool::MixerBrush => ("paint.mixerBrush", json!({})),
+        Tool::ColorReplacement => ("paint.colorReplacement", crate::retouch_ui::color_replacement_params(app)),
+        Tool::HistoryBrush => ("paint.historyBrush", crate::retouch_ui::history_brush_params(app)),
+        Tool::PatternStamp => ("paint.patternStamp", crate::retouch_ui::pattern_stamp_params(app, first)),
+        Tool::BackgroundEraser => ("paint.backgroundEraser", crate::eraser_ui::background_eraser_params(app, first)),
+        // A new layer for the result would be made in the view's copy, not the document.
+        Tool::Remove => ("paint.remove", json!({"sampleAllLayers": o.sample_all.remove, "newLayer": false})),
+        t => crate::retouch_ui::dab_params(app, t)?,
+    };
+    if let Some(m) = p.as_object_mut() {
+        m.remove("points");
+        // An aligned Pattern Stamp's phase is in the flat image's pixels, not the view's.
+        m.remove("phase");
+    }
+    p["target"] = crate::canvas::paint_target(app);
+    Some((command, p))
 }
 
 /// Draws document `host.idx`'s canvas as a 360° View into `rect` and runs its camera and strokes. Returns the view
@@ -422,8 +498,9 @@ pub(crate) fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui, host: CanvasHost,
     }
     // A Free Transform holds the view: no looking around while its box is up.
     let held = super::view360_xform::holds_view(app, idx);
-    let painting = (matches!(gesture, Gesture::Paint | Gesture::Select | Gesture::Move) && active) || held;
-    let looks = !held && (response.dragged_by(PointerButton::Middle) || (response.dragged_by(PointerButton::Primary) && !painting));
+    let painting = (matches!(gesture, Gesture::Paint | Gesture::Select | Gesture::Move | Gesture::Point) && active) || held;
+    // The left button looks around only with the Hand tool or Space, as it scrolls the flat canvas.
+    let looks = !held && (response.dragged_by(PointerButton::Middle) || (response.dragged_by(PointerButton::Primary) && gesture == Gesture::Look));
     let grabbed = host.canvas_id().with("360-grab");
     if looks {
         match app.session.prefs().tools.sphere_drag {
@@ -458,11 +535,13 @@ pub(crate) fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui, host: CanvasHost,
         look.look_at(u, v, iw, ih);
         look.scale_fov(if ctx.input(|i| i.modifiers.alt) { 1.25 } else { 0.8 });
     }
-    if gesture == Gesture::Look && tool != Tool::Hand && !space && (response.drag_started_by(PointerButton::Primary) || response.clicked()) {
+    if gesture == Gesture::Unsupported && (response.drag_started_by(PointerButton::Primary) || response.clicked()) {
         // Say why the tool did nothing rather than leave it a mystery.
         let name = tl!(tool.label()).to_string();
-        app.ui.status =
-            crate::i18n::fmt(tl!("{tool} doesn't work in 360° View yet, so dragging looks around. Turn off View › 360° View to use it."), &[("tool", &name)]);
+        app.ui.status = crate::i18n::fmt(
+            tl!("{tool} doesn't work in 360° View yet. Turn off View › 360° View to use it, and drag with the middle button or hold Space to look around."),
+            &[("tool", &name)],
+        );
         app.ui.status_error = false;
     }
     let mut look = look.clamped();
@@ -505,18 +584,22 @@ pub(crate) fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui, host: CanvasHost,
     }
     let pass = super::view360_select::Pass { rect, ppp, look: &look, vp: &vp };
     super::view360_select::ants(app, &ctx, &painter, host.canvas_id(), idx, &pass);
+    marks(app, &painter, rect, ppp, &vp, idx, &colors);
     if held {
         super::view360_xform::transform(app, &ctx, &response, &painter, rect, ppp, idx);
     } else if painting && gesture == Gesture::Move {
         super::view360_xform::move_tool(app, &ctx, &response, &painter, idx, &pass);
     } else if painting && gesture == Gesture::Select {
         super::view360_select::tool(app, &ctx, &response, &painter, host.canvas_id(), &pass);
+    } else if painting && gesture == Gesture::Point {
+        point(app, &ctx, &response, &pass);
     } else if painting {
         look = paint(app, &ctx, &response, &painter, &Frame { rect, look, vp, doc: doc.id });
     } else if response.hovered() {
         ctx.set_cursor_icon(match gesture {
             Gesture::Zoom if ctx.input(|i| i.modifiers.alt) => egui::CursorIcon::ZoomOut,
             Gesture::Zoom => egui::CursorIcon::ZoomIn,
+            Gesture::Unsupported if !response.dragged_by(PointerButton::Middle) => egui::CursorIcon::NotAllowed,
             _ if response.dragged() => egui::CursorIcon::Grabbing,
             _ => egui::CursorIcon::Grab,
         });
@@ -623,6 +706,10 @@ fn paint(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Response
                     "projection": projection,
                 }),
             ),
+            t if projects(t) => {
+                let (command, params) = projected(app, t, &[[at[0], at[1], pressure]])?;
+                ("paint.projectedTool", json!({"command": command, "params": params, "projection": projection}))
+            }
             _ => ("paint.projectedStroke", json!({"erase": tool == Tool::Eraser, "zoom": 1.0, "target": target, "projection": projection})),
         };
         let preview = match command {
@@ -783,6 +870,90 @@ fn quaternion(m: &Rot) -> [f32; 4] {
     q.map(|v| v as f32)
 }
 
+/// The latlong pixel under view point `p` of `pass`, for a document `size` pixels.
+fn latlong(pass: &super::view360_select::Pass<'_>, p: Pos2, size: [f64; 2]) -> [f64; 2] {
+    let [x, y] = pass.to_view(p);
+    let [u, v] = pass.vp.view_to_equirect(x, y, size[0], size[1]);
+    [u.rem_euclid(size[0]), v.clamp(0.0, (size[1] - 1e-6).max(0.0))]
+}
+
+/// A click with a [`points`] tool: its flat command at the latlong pixel under the pointer. The Eyedropper also
+/// samples as it drags, and Alt (Option) picks the background colour.
+fn point(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Response, pass: &super::view360_select::Pass<'_>) {
+    let tool = app.ui.tool;
+    let Some(size) = app.session.active().map(|st| [f64::from(st.doc.size.width), f64::from(st.doc.size.height)]) else { return };
+    if response.hovered() {
+        ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
+    }
+    if tool == Tool::Eyedropper {
+        if (response.clicked_by(PointerButton::Primary) || response.dragged_by(PointerButton::Primary))
+            && let Some(p) = response.interact_pointer_pos()
+            && let Some(c) = crate::canvas::sampling::eyedropper_color(app, latlong(pass, p, size))
+        {
+            let key = if ctx.input(|i| i.modifiers.alt) { "background" } else { "foreground" };
+            let _ = app.run("tools.setColors", json!({ key: [c[0], c[1], c[2], 1.0] }));
+        }
+        return;
+    }
+    let Some(p) = response.interact_pointer_pos().filter(|_| response.clicked_by(PointerButton::Primary)) else { return };
+    let at = latlong(pass, p, size);
+    let result = match tool {
+        Tool::ColorSampler => app.run("view.colorSamplers.add", json!({"x": at[0], "y": at[1]})).map(|_| ()),
+        Tool::Count => {
+            let r = app.run("count.add", json!({"x": at[0], "y": at[1]}));
+            // A marker that stays hidden looks like the click did nothing, as on the flat canvas.
+            app.ui.view.show.count |= r.is_ok();
+            r.map(|_| ())
+        }
+        Tool::Note => crate::analysis::create_note(app, at[0], at[1]).map(|_| ()),
+        Tool::RedEye => {
+            crate::canvas::tools::retouch::red_eye_click(app, at);
+            Ok(())
+        }
+        _ => {
+            crate::canvas::paint_tool::click_tool(app, tool, at);
+            Ok(())
+        }
+    };
+    if let Err(e) = result {
+        app.ui.status = e;
+        app.ui.status_error = true;
+    }
+}
+
+/// The active document's colour samplers, count markers and notes where they are on the sphere, as small marks.
+fn marks(app: &PhotocraftApp, painter: &egui::Painter, rect: Rect, ppp: f32, vp: &ViewProjection, idx: usize, colors: &Colors) {
+    let Some(st) = app.session.documents().get(idx) else { return };
+    let (iw, ih) = (f64::from(st.doc.size.width), f64::from(st.doc.size.height));
+    let at = |q: [f64; 2]| -> Option<Pos2> {
+        let [x, y] = vp.equirect_to_view(q[0], q[1], iw, ih)?;
+        Some(rect.min + vec2(x as f32, y as f32) / ppp).filter(|p| rect.contains(*p))
+    };
+    for q in &st.color_samplers {
+        if let Some(p) = at(*q) {
+            crosshair(painter, p, colors);
+            painter.circle_stroke(p, 4.0, Stroke::new(1.0, colors.line));
+        }
+    }
+    if app.ui.view.show.count {
+        for q in st.doc.measurement.count_groups.iter().flat_map(|g| &g.points) {
+            if let Some(p) = at(*q) {
+                painter.circle_filled(p, 4.0, colors.halo);
+                painter.circle_filled(p, 2.5, colors.line);
+            }
+        }
+    }
+    if app.ui.view.show.notes {
+        for n in &st.doc.notes {
+            if let Some(p) = at(n.position) {
+                let r = Rect::from_min_size(p, vec2(10.0, 10.0));
+                painter.rect_filled(r, 1.0, colors.halo);
+                painter.rect_stroke(r, 1.0, Stroke::new(1.0, colors.line), egui::StrokeKind::Inside);
+            }
+        }
+    }
+}
+
 /// A small cross at `p`, over a halo so it reads on any image.
 fn crosshair(painter: &egui::Painter, p: Pos2, colors: &Colors) {
     for (width, color) in [(3.0, colors.halo), (1.0, colors.line)] {
@@ -865,7 +1036,15 @@ pub(crate) fn navigator(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize) 
     // the fields round what they show (yaw to a whole degree), so taking every pass's value would snap the camera
     // to the rounding while it is dragged, and jitter.
     let mut fov = f64::from(look.fov);
-    if !Slider::new(Bind::bound(&mut fov), MIN_FOV..=MAX_FOV).step(0.5).label(tl!("Field of view")).show(ui).events.is_empty() {
+    let button = shows_button(app, idx);
+    let slid = craft::ui::layout_components::Row::new().show(ui, |ui, _| {
+        let slid = !Slider::new(Bind::bound(&mut fov), MIN_FOV..=MAX_FOV).step(0.5).label(tl!("Field of view")).show(ui).events.is_empty();
+        if button {
+            navigator_button(ui, true);
+        }
+        slid
+    });
+    if slid.inner.unwrap_or(false) {
         look.fov = fov as f32;
     }
     let fields: [(&str, f32, std::ops::RangeInclusive<f64>); 3] =

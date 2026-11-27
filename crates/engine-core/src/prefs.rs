@@ -533,6 +533,8 @@ pub struct Tools {
     pub nudge_bundle_pause_ms: u32,
     /// View › 360° View: whether a drag grabs the image or turns the camera.
     pub sphere_drag: SphereDrag,
+    /// A View › 360° View button in the Navigator, beside its zoom, on a 2:1 document or while the view is on.
+    pub sphere_navigator_button: bool,
 }
 
 impl Default for Tools {
@@ -555,6 +557,7 @@ impl Default for Tools {
             bundle_nudges: true,
             nudge_bundle_pause_ms: 1000,
             sphere_drag: SphereDrag::GrabImage,
+            sphere_navigator_button: true,
         }
     }
 }

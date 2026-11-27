@@ -188,7 +188,7 @@ fn with_resize<R>(app: &mut PhotocraftApp, f: impl FnOnce(&mut crate::brush_resi
 /// A press the paint tool takes: the resize chord, the HUD Color Picker, a Mixer Brush load (a click
 /// that is done at once), or a stroke.
 /// A Paint Bucket or Magic Eraser press: the fill or the erase runs at the clicked pixel. Returns false for any other tool.
-fn click_tool(app: &mut PhotocraftApp, tool: Tool, at: [f64; 2]) -> bool {
+pub(crate) fn click_tool(app: &mut PhotocraftApp, tool: Tool, at: [f64; 2]) -> bool {
     match tool {
         Tool::PaintBucket => {
             let o = app.ui.tool_options.clone();

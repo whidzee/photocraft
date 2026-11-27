@@ -489,3 +489,87 @@ fn rotate_panorama_opens_previews_and_applies() {
     assert!(pixel(&app, at[0], at[1])[1] > 0.5, "the red turned away from the front");
     assert!(pixel(&app, at[0] + 200.0, at[1])[1] < 0.2, "a quarter turn to the right: {:?}", pixel(&app, at[0] + 200.0, at[1]));
 }
+
+/// A drag with `button` along `points`, a pass per event, holding Space when `space`.
+fn drag_with(app: &mut PhotocraftApp, button: PointerButton, space: bool, points: &[Pos2]) {
+    let key = |pressed| Event::Key { key: egui::Key::Space, physical_key: None, pressed, repeat: false, modifiers: Modifiers::NONE };
+    let press = |at, pressed| Event::PointerButton { pos: at, button, pressed, modifiers: Modifiers::NONE };
+    let mut first = vec![Event::PointerMoved(points[0])];
+    if space {
+        first.push(key(true));
+    }
+    pass(app, first);
+    pass(app, vec![press(points[0], true)]);
+    for &p in &points[1..] {
+        pass(app, vec![Event::PointerMoved(p)]);
+    }
+    pass(app, vec![press(points[points.len() - 1], false)]);
+    pass(app, if space { vec![key(false)] } else { vec![] });
+}
+
+/// The left button looks around only with the Hand tool or with Space held; the middle button always does. A tool
+/// the view can't use yet says so and leaves the camera alone.
+#[test]
+fn the_left_button_looks_around_only_with_the_hand_or_space() {
+    let mut app = app(800, 400, Tool::Crop);
+    let c = RECT.center();
+    let path = [c, c + vec2(20.0, 0.0), c + vec2(60.0, 0.0)];
+    let before = look(&app);
+    drag_with(&mut app, PointerButton::Primary, false, &path);
+    assert_eq!(look(&app).yaw, before.yaw, "a left drag with the Crop tool doesn't look around");
+    assert!(app.ui.status.contains("360° View"), "{}", app.ui.status);
+    drag_with(&mut app, PointerButton::Middle, false, &path);
+    let middle = look(&app);
+    assert!(middle.yaw != before.yaw, "the middle button looks around");
+    drag_with(&mut app, PointerButton::Primary, true, &path);
+    assert!(look(&app).yaw != middle.yaw, "Space and the left button look around");
+}
+
+/// The Eyedropper picks the colour under the click, and the Color Sampler and Count tools mark the latlong pixel
+/// under it, without turning the view.
+#[test]
+fn point_tools_act_at_the_latlong_pixel_under_the_click() {
+    let mut app = app(800, 400, Tool::Eyedropper);
+    let at = pos2(300.0, 120.0);
+    let [u, v] = latlong_at(at);
+    spot(&mut app, [u, v], "#ff0000");
+    let before = look(&app);
+    drag(&mut app, &[at]);
+    let fg = app.session.tools.foreground;
+    assert!(fg[0] > 0.9 && fg[1] < 0.1, "picked red: {fg:?}");
+    assert_eq!(look(&app).yaw, before.yaw);
+    app.ui.tool = Tool::ColorSampler;
+    drag(&mut app, &[at]);
+    let samplers = &app.session.documents()[0].color_samplers;
+    assert!(samplers.iter().any(|q| (q[0] - u).abs() < 2.0 && (q[1] - v).abs() < 2.0), "{samplers:?} near ({u}, {v})");
+    app.ui.tool = Tool::Count;
+    drag(&mut app, &[at]);
+    let counted = app.session.documents()[0].doc.measurement.count_groups.iter().flat_map(|g| g.points.clone()).collect::<Vec<_>>();
+    assert!(counted.iter().any(|q| (q[0] - u).abs() < 2.0 && (q[1] - v).abs() < 2.0), "{counted:?} near ({u}, {v})");
+}
+
+/// The Pencil paints in the view through its flat command, where the view looks, in one History step.
+#[test]
+fn the_pencil_paints_in_the_view() {
+    let mut app = app(800, 400, Tool::Pencil);
+    app.session.tools.brush.size = 8.0;
+    let c = RECT.center();
+    let [u, v] = latlong_at(c);
+    assert!(pixel(&app, u, v)[0] > 0.9, "white before");
+    let steps = app.session.documents()[0].history.past_len();
+    drag(&mut app, &[c, c + vec2(6.0, 0.0), c + vec2(12.0, 0.0)]);
+    assert_eq!(app.session.documents()[0].history.past_len(), steps + 1);
+    assert!(pixel(&app, u, v)[0] < 0.1, "the foreground black: {:?}", pixel(&app, u, v));
+}
+
+/// Quick Selection selects in the view where its brush is dragged.
+#[test]
+fn quick_selection_selects_where_it_is_dragged() {
+    let mut app = app(800, 400, Tool::QuickSelection);
+    app.session.tools.brush.size = 10.0;
+    let c = RECT.center();
+    spot(&mut app, latlong_at(c), "#000000");
+    drag(&mut app, &[c, c + vec2(2.0, 0.0), c + vec2(4.0, 0.0)]);
+    assert!(selected(&app, latlong_at(c)), "the dark spot is selected");
+    assert!(!selected(&app, latlong_at(pos2(40.0, 40.0))), "the far white isn't");
+}

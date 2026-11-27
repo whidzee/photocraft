@@ -221,6 +221,7 @@ fn label_override(key: &str) -> Option<&'static str> {
         "bundleNudges" => "Bundle Arrow-Key Nudges",
         "nudgeBundlePauseMs" => "Nudge Bundle Pause (ms)",
         "sphereDrag" => "360° View Drag",
+        "sphereNavigatorButton" => "Show 360° View Button in Navigator",
         "doNotAppendCopy" => "Do not append \"copy\" to filename when saving a copy",
         "pcraftFullComposite" => "Save Full-Size Composite in .pcraft Files",
         "generatorEnabled" => "Enable Generator",

@@ -82,7 +82,7 @@ pub(crate) fn tool<'a>(scope: &'a ToolScope<'a>, state: &'a mut RetouchTools, _h
 
 /// A Red Eye click. CMYK, Grayscale and Indexed Color documents get the reference's alert (#12575); the alert host
 /// shows one alert per message, so more clicks while it is open add nothing.
-fn red_eye_click(app: &mut PhotocraftApp, at: [f64; 2]) {
+pub(crate) fn red_eye_click(app: &mut PhotocraftApp, at: [f64; 2]) {
     use photocraft_engine::redeye_cmds::MODE_REFUSAL;
     let o = app.ui.tool_options.clone();
     let result = app.run(

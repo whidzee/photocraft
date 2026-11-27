@@ -213,6 +213,12 @@ fn geometry_params(app: &PhotocraftApp, geometry: &ShapeGeometry, kind: ShapeKin
     })
 }
 
+/// `shape.create` params for `tool`'s `geometry` with the options bar's fill and stroke: the shape tools in View ›
+/// 360° View, which make their shapes in view pixels.
+pub(crate) fn tool_create_params(app: &PhotocraftApp, tool: Tool, geometry: &ShapeGeometry) -> Result<Value, String> {
+    create_params(app, geometry, kind_of(tool))
+}
+
 /// `shape.create` params with the options bar's fill and stroke.
 fn create_params(app: &PhotocraftApp, geometry: &ShapeGeometry, kind: ShapeKind) -> Result<Value, String> {
     let mut p = geometry_params(app, geometry, kind)?;

@@ -47,7 +47,7 @@ use pen::pen_path_op;
 pub(crate) use pen::{PATH_OPS, path_op_field, pen_path};
 pub use pen::{cancel_stale, pen_commit};
 pub use shapes::is_shape_tool;
-pub(crate) use shapes::{create_geometry, kind_of, tool_history_name};
+pub(crate) use shapes::{create_geometry, kind_of, tool_create_params, tool_history_name};
 
 #[cfg(test)]
 use crate::shape_paint_ui::PaintChange;

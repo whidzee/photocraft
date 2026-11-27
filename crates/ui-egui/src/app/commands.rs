@@ -19,6 +19,10 @@ impl PhotocraftApp {
         if let Some(result) = mask_trash_prompt::intercept(self, id, &params) {
             return result;
         }
+        // Make Selection, Fill Path and Stroke Path in View › 360° View.
+        if let Some(result) = crate::canvas::view360_path::intercept(self, id, &params) {
+            return result;
+        }
         // Automation input also gates every step a command runs on its behalf (`actions.play`).
         let gate = if self.automation_input && self.session.authorize.is_none() { self.services.automation_authorize } else { None };
         if gate.is_some() {

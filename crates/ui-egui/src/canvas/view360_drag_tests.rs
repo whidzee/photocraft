@@ -137,3 +137,35 @@ fn a_navigator_drag_turns_the_view_steadily() {
         assert!(yaws.last().unwrap() - yaws[0] > 30.0, "navigator first={first}: {yaws:?}");
     }
 }
+
+/// Text typed after a click with the Type tool in the whole app goes into its field, not to the tool shortcuts, and
+/// Enter places it as a new layer.
+#[test]
+fn typed_text_is_placed_as_a_new_layer() {
+    let mut h = Harness::builder().with_size(vec2(1280.0, 800.0)).with_step_dt(1.0 / 60.0).with_max_steps(64).build_eframe(|cc| {
+        PhotocraftApp::setup_context(&cc.egui_ctx, Default::default());
+        let mut session = photocraft_engine::Session::new();
+        session.edit_prefs(|p| p.general.auto_show_home_screen = false);
+        let mut app = PhotocraftApp::with_context(cc.egui_ctx.clone(), session, crate::Services::default());
+        app.run("file.new", json!({"width": 2048, "height": 1024})).unwrap();
+        app.sync_views();
+        app
+    });
+    h.run_steps(6);
+    super::view360::command(h.state_mut(), &json!({"on": true})).unwrap();
+    h.state_mut().ui.tool = Tool::Type;
+    h.run_steps(4);
+    let layers = h.state().session.documents()[0].doc.walk().len();
+    let c = h.state().last_canvas_rect.center();
+    h.event(egui::Event::PointerMoved(c));
+    h.event(egui::Event::PointerButton { pos: c, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    h.run_steps(1);
+    h.event(egui::Event::PointerButton { pos: c, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.run_steps(3);
+    h.event(egui::Event::Text("Hello b".into()));
+    h.run_steps(2);
+    h.key_press(egui::Key::Enter);
+    h.run_steps(3);
+    assert_eq!(h.state().ui.tool, Tool::Type, "typing picked no tool");
+    assert_eq!(h.state().session.documents()[0].doc.walk().len(), layers + 1, "{}", h.state().ui.status);
+}

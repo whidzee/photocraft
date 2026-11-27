@@ -573,3 +573,48 @@ fn quick_selection_selects_where_it_is_dragged() {
     assert!(selected(&app, latlong_at(c)), "the dark spot is selected");
     assert!(!selected(&app, latlong_at(pos2(40.0, 40.0))), "the far white isn't");
 }
+
+/// The Gradient dragged in the view covers the whole sphere, behind the camera too, in one History step.
+#[test]
+fn the_gradient_covers_the_whole_sphere() {
+    let mut app = app(800, 400, Tool::Gradient);
+    let steps = app.session.documents()[0].history.past_len();
+    let c = RECT.center();
+    drag(&mut app, &[c - vec2(40.0, 0.0), c, c + vec2(40.0, 0.0)]);
+    assert_eq!(app.session.documents()[0].history.past_len(), steps + 1);
+    // Well past the view on either side (120° left and right, out of the 90° view): the two ends of the default
+    // foreground to background gradient, so the paint reached there.
+    let (left, right) = (pixel(&app, 133.0, 200.0), pixel(&app, 667.0, 200.0));
+    assert!((left[0] - right[0]).abs() > 0.8, "the ends on either side behind the view: {left:?} and {right:?}");
+}
+
+/// A Rectangle dragged in the view becomes a new pixel layer, filled where it was drawn and empty elsewhere.
+#[test]
+fn a_rectangle_drawn_in_the_view_is_a_new_layer_there() {
+    let mut app = app(800, 400, Tool::Rectangle);
+    let layers = app.session.documents()[0].doc.walk().len();
+    let c = RECT.center();
+    drag(&mut app, &[c - vec2(30.0, 20.0), c, c + vec2(30.0, 20.0)]);
+    assert_eq!(app.session.documents()[0].doc.walk().len(), layers + 1);
+    let [u, v] = latlong_at(c);
+    assert!(pixel(&app, u, v)[3] > 0.9, "filled where it was drawn: {:?}", pixel(&app, u, v));
+    let [u, v] = latlong_at(pos2(20.0, 20.0));
+    assert!(pixel(&app, u, v)[3] < 0.1, "empty elsewhere");
+}
+
+/// Four clicks with the Pen and a click back on the first point make a closed Work Path, which Make Selection turns
+/// into a selection of what it encloses in the view.
+#[test]
+fn a_pen_path_drawn_in_the_view_selects_what_it_encloses() {
+    let mut app = app(800, 400, Tool::Pen);
+    let c = RECT.center();
+    let corners = [c + vec2(-40.0, -30.0), c + vec2(40.0, -30.0), c + vec2(40.0, 30.0), c + vec2(-40.0, 30.0), c + vec2(-40.0, -30.0)];
+    for p in corners {
+        drag(&mut app, &[p]);
+    }
+    let path = app.session.documents()[0].doc.work_path.clone().expect("a work path");
+    assert!(path.subpaths.first().is_some_and(|s| s.closed), "closed");
+    app.run("path.toSelection", json!({})).unwrap();
+    assert!(selected(&app, latlong_at(c)), "inside the path");
+    assert!(!selected(&app, latlong_at(pos2(20.0, 20.0))), "not outside it");
+}

@@ -43,6 +43,8 @@ mod pixels;
 pub mod prefs;
 pub mod preset_store;
 pub mod presets;
+pub mod projected_fill;
+pub mod projected_path;
 pub mod projected_select;
 pub mod projected_tool;
 pub mod projected_transform;

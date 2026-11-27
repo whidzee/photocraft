@@ -73,10 +73,10 @@ pub(crate) use params::{layer_id, nums, op_from, pt};
 pub use params::{parse_path, parse_stroke, path_json};
 pub use paths::STROKE_PATH_TOOLS;
 use paths::{
-    clipping_path_clear, clipping_path_set, path_delete, path_fill, path_rename, path_set, path_stroke, path_to_selection, path_to_selection_with_mode,
+    clipping_path_clear, clipping_path_set, path_delete, path_fill, path_rename, path_stroke, path_to_selection, path_to_selection_with_mode,
     path_transform, paths_list, resolve_path, select_to_work_path,
 };
-pub(crate) use paths::{is_work, path_mut};
+pub(crate) use paths::{is_work, path_mut, path_set};
 pub(crate) use shape::{bake_path, map_path, map_shape, shift_shape, translate_vectors_wrapped, with_shape};
 use shape::{
     can_paste_shape_fill, can_paste_shape_stroke, combine_shapes, copy_shape_fill, copy_shape_stroke, has_shape_fill, has_shape_stroke, merge_components,
@@ -204,7 +204,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Make Selection from Path",
             menu: &[],
             shortcut: Some("Cmd+Enter"),
-            params: r##"{"name":str|"work"|"layer"="work","feather":px=0,"antiAlias":bool=true,"mode":"replace|add|subtract|intersect"="replace"}"##,
+            params: r##"{"name":str|"work"|"layer"="work","feather":px=0,"antiAlias":bool=true,"mode":"replace|add|subtract|intersect"="replace","wrap":bool=false (360° View: the path also counts one image width left and right, across the ±180° seam)}"##,
             enabled: has_doc,
             run: path_to_selection,
             journal: true,
@@ -256,7 +256,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "path.fill",
             "Fill Path",
             [],
-            r##"{"name":str|"work"|"layer"="work","layer":id? (pixel layer, default active),"color":"#rrggbb"=foreground,"opacity":0..100=100,"mode":"normal|multiply|…"="normal","feather":px=0,"antiAlias":bool=true}"##,
+            r##"{"name":str|"work"|"layer"="work","layer":id? (pixel layer, default active),"color":"#rrggbb"=foreground,"opacity":0..100=100,"mode":"normal|multiply|…"="normal","feather":px=0,"antiAlias":bool=true,"wrap":bool=false (360° View: across the ±180° seam, as path.toSelection)}"##,
             has_layer,
             path_fill
         ),

@@ -1,6 +1,6 @@
 //! Paint helpers: Paint Bucket and Gradient tool.
 
-use photocraft_algo::paint::{FillMode, GradientShape, bucket_fill_inks, bucket_fill_region_inks, paint_gradient};
+use photocraft_algo::paint::{FillMode, GradientFill, GradientShape, bucket_fill_inks, bucket_fill_region_inks, paint_gradient};
 use serde_json::{Value, json};
 
 use crate::commands::{CommandSpec, parse_blend};
@@ -58,14 +58,37 @@ fn fill_mode(p: &Value) -> Result<FillMode> {
 /// The reference's alert for a Paint Bucket click in a Bitmap document (#12536).
 pub const BITMAP_REFUSAL: &str = "Could not use the paint bucket because it does not work with Bitmap images (convert image to Grayscale mode to edit).";
 
+/// The Paint Bucket's settings from its params, apart from where it is clicked and what it fills with.
+pub(crate) struct BucketSetup {
+    pub color: [f32; 4],
+    pub tolerance: f32,
+    pub contiguous: bool,
+    pub anti_alias: bool,
+    pub opacity: f32,
+    pub mode: FillMode,
+    /// The region is found on every visible layer.
+    pub all: bool,
+    /// Whether it fills with a pattern rather than the colour.
+    pub pattern: bool,
+}
+
+pub(crate) fn bucket_setup(s: &Session, p: &Value) -> Result<BucketSetup> {
+    let source = p.get("contents").or_else(|| p.get("source")).and_then(Value::as_str).unwrap_or("foreground");
+    Ok(BucketSetup {
+        color: color(p.get("color"), s.tools.foreground),
+        tolerance: f(p, "tolerance", 32.0),
+        contiguous: b(p, "contiguous", true),
+        anti_alias: b(p, "antiAlias", true),
+        opacity: opacity(p, "paint.bucket")?,
+        mode: fill_mode(p)?,
+        all: b(p, "sampleAllLayers", false) && crate::channel_cmds::target_of(p) == crate::channel_cmds::Target::Pixels,
+        pattern: source == "pattern",
+    })
+}
+
 fn bucket(s: &mut Session, p: &Value) -> Result<Value> {
-    let fg = s.tools.foreground;
-    let c = color(p.get("color"), fg);
+    let BucketSetup { color: c, tolerance: tol, contiguous, anti_alias: aa, opacity, mode, all, pattern: by_pattern } = bucket_setup(s, p)?;
     let (x, y) = (f(p, "x", 0.0).floor() as i32, f(p, "y", 0.0).floor() as i32);
-    let (tol, contiguous, aa) = (f(p, "tolerance", 32.0), b(p, "contiguous", true), b(p, "antiAlias", true));
-    let opacity = opacity(p, "paint.bucket")?;
-    let mode = fill_mode(p)?;
-    let all = b(p, "sampleAllLayers", false) && crate::channel_cmds::target_of(p) == crate::channel_cmds::Target::Pixels;
     // Before the region, the target and the document copy: a Bitmap click changes nothing.
     if s.active().is_some_and(|d| d.doc.mode == photocraft_color::ColorMode::Bitmap) {
         return Err(EngineError::Other(BITMAP_REFUSAL.into()));
@@ -80,8 +103,7 @@ fn bucket(s: &mut Session, p: &Value) -> Result<Value> {
         None
     };
     // Fill source: foreground colour (default) or a pattern (the Paint Bucket "Fill" dropdown).
-    let source = p.get("contents").or_else(|| p.get("source")).and_then(Value::as_str).unwrap_or("foreground");
-    let pattern = if source == "pattern" {
+    let pattern = if by_pattern {
         let pat = crate::pattern_cmds::resolve_param(s, "paint.bucket", p)?;
         let tile = photocraft_compose::pattern::Tile::new(&pat)
             .ok_or_else(|| EngineError::BadParams { cmd: "paint.bucket".into(), msg: "the pattern is empty or too large to paint".into() })?;
@@ -133,9 +155,47 @@ fn bucket(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({ "filled": filled }))
 }
 
+/// The Gradient tool's settings from its params, apart from where it is dragged.
+pub(crate) struct GradientSetup {
+    pub shape: GradientShape,
+    pub stops: Vec<(f32, [f32; 4])>,
+    pub reverse: bool,
+    pub opacity: f32,
+    pub blend: photocraft_color::BlendMode,
+    pub dither: bool,
+}
+
+impl GradientSetup {
+    /// What [`paint_gradient_by`](photocraft_algo::paint::paint_gradient_by) paints with, clipped by `selection`.
+    pub(crate) fn fill<'a>(&'a self, selection: Option<&'a photocraft_raster::Surface>, lock_transparency: bool) -> GradientFill<'a> {
+        GradientFill {
+            stops: &self.stops,
+            reverse: self.reverse,
+            opacity: self.opacity,
+            blend_mode: self.blend,
+            dither: self.dither,
+            selection,
+            lock_transparency,
+        }
+    }
+}
+
 fn gradient(s: &mut Session, p: &Value) -> Result<Value> {
     let from = point(p, "from").ok_or_else(|| EngineError::BadParams { cmd: "paint.gradient".into(), msg: "missing from".into() })?;
     let to = point(p, "to").ok_or_else(|| EngineError::BadParams { cmd: "paint.gradient".into(), msg: "missing to".into() })?;
+    let GradientSetup { shape, stops, reverse, opacity, blend, dither } = gradient_setup(s, p)?;
+    let layer = if p.get("layer").is_some() { Some(crate::commands::layer_param(s, p)?) } else { s.active().and_then(|st| st.active_layer) };
+    s.edit("Gradient", |doc, _| {
+        let sel = doc.selection.clone();
+        let area = sel.as_ref().map(|m| m.content_bounds()).filter(|r| !r.is_empty()).unwrap_or_else(|| doc.bounds()).intersect(&doc.bounds());
+        let (surf, lock) = crate::channel_cmds::target_surface(doc, layer, p)?;
+        paint_gradient(surf, area, from, to, shape, &stops, reverse, opacity, blend, dither, sel.as_ref(), lock);
+        Ok(())
+    })?;
+    Ok(Value::Null)
+}
+
+pub(crate) fn gradient_setup(s: &Session, p: &Value) -> Result<GradientSetup> {
     let shape = match p.get("style").and_then(Value::as_str).unwrap_or("linear") {
         "radial" => GradientShape::Radial,
         "angle" => GradientShape::Angle,
@@ -188,15 +248,7 @@ fn gradient(s: &mut Session, p: &Value) -> Result<Value> {
     let opacity = opacity(p, "paint.gradient")?;
     let blend = p.get("mode").and_then(Value::as_str).and_then(parse_blend).unwrap_or(photocraft_color::BlendMode::Normal);
     let dither = b(p, "dither", true); // Photoshop dithers gradients by default (reduces banding).
-    let layer = if p.get("layer").is_some() { Some(crate::commands::layer_param(s, p)?) } else { s.active().and_then(|st| st.active_layer) };
-    s.edit("Gradient", |doc, _| {
-        let sel = doc.selection.clone();
-        let area = sel.as_ref().map(|m| m.content_bounds()).filter(|r| !r.is_empty()).unwrap_or_else(|| doc.bounds()).intersect(&doc.bounds());
-        let (surf, lock) = crate::channel_cmds::target_surface(doc, layer, p)?;
-        paint_gradient(surf, area, from, to, shape, &stops, reverse, opacity, blend, dither, sel.as_ref(), lock);
-        Ok(())
-    })?;
-    Ok(Value::Null)
+    Ok(GradientSetup { shape, stops, reverse, opacity, blend, dither })
 }
 
 /// Smooth's colour and opacity stops baked apart, then joined. Both bakes sample the same

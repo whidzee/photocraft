@@ -137,3 +137,14 @@ mod mask_escape_tests;
 
 #[cfg(test)]
 mod unchanged_edit_history_tests;
+
+/// `type.create` params for point text `text` at `(x, y)`, with the options bar's and the saved type defaults: the
+/// Type tool in View › 360° View, which makes its text in view pixels.
+pub(crate) fn point_text_params(app: &PhotocraftApp, x: f64, y: f64, text: &str) -> serde_json::Value {
+    let mut p = defaults::default_style_params(app);
+    p["text"] = json!(text);
+    p["orientation"] = json!(if app.ui.tool.is_vertical_type() { "vertical" } else { "horizontal" });
+    p["x"] = json!(x.round());
+    p["y"] = json!(y.round());
+    p
+}

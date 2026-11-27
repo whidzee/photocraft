@@ -26,7 +26,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Projected Tool Stroke",
             [],
             None,
-            r##"{"command":"paint.healingBrush|paint.spotHealing|paint.patch","params":{…that command's params, without points…},"points":[[x,y,pressure],…] (view px),"rotation":[9 numbers]? (Healing/Patch: destination→source on the sphere),"projection":{"yaw","pitch","fov","width","height"}} — View › 360° View: a retouch tool stroke drawn in the perspective view, reprojected onto the equirect pixels"##,
+            r##"{"command":"paint.healingBrush|paint.spotHealing|paint.patch|paint.pencil|paint.mixerBrush|paint.colorReplacement|paint.historyBrush|paint.patternStamp|paint.backgroundEraser|paint.remove|paint.blur|paint.sharpen|paint.smudge|paint.dodge|paint.burn|paint.sponge|paint.gradient|paint.bucket","params":{…that command's params, without points…},"points":[[x,y,pressure],…] (view px),"rotation":[9 numbers]? (Healing/Patch: destination→source on the sphere),"projection":{"yaw","pitch","fov","width","height"}} — View › 360° View: a painting or retouch tool stroke drawn in the perspective view, reprojected onto the equirect pixels; the Gradient (first point to last) and the Paint Bucket (first point) cover the whole latlong, the bucket flooding across the ±180° seam"##,
             has_paintable,
             crate::projected_tool::projected_tool
         ),
@@ -56,6 +56,24 @@ pub fn specs() -> Vec<CommandSpec> {
             r##"{"source":"layer|clipboard","rect":[x0,y0,x1,y1] (layer: the view-px source),"quad":[[x,y]×4] (tl,tr,br,bl view px),"projection":{"yaw","pitch","fov","width","height"}} — View › 360° View: Free Transform of the active layer's content, or Paste as a new layer, mapped through the view onto the equirect pixels"##,
             has_doc,
             crate::projected_transform::projected_place
+        ),
+        cmd!(
+            "layer.projectedRender",
+            "Type",
+            [],
+            None,
+            r##"{"command":"type.create|shape.create","params":{…that command's params, in view px…},"projection":{"yaw","pitch","fov","width","height"}} — View › 360° View: the Type and shape tools; the text or shape is rendered upright where it was made in the view and placed on the latlong as a new pixel layer named after it"##,
+            has_doc,
+            crate::projected_transform::projected_render
+        ),
+        cmd!(
+            "path.projectedSet",
+            "Work Path",
+            [],
+            None,
+            r##"{…path.set params, with "path" in view px…,"projection":{"yaw","pitch","fov","width","height"}} — View › 360° View: a path drawn with the Pen tools in the view, stored on the latlong where it was drawn (x may run past an edge across the ±180° seam; "wrap":true on path.toSelection and path.fill counts those parts on the other side)"##,
+            has_doc,
+            crate::projected_path::projected_set
         ),
         cmd!(
             "image.rotatePanorama",

@@ -1,6 +1,8 @@
 //! `paint.projectedTool`: a flat-canvas painting or retouch tool (the Healing Brush, Spot Healing
 //! Brush and Patch, the Pencil, Mixer Brush, Color Replacement, History Brush, Pattern Stamp,
-//! Background Eraser, Remove Tool and the Blur to Sponge tools) in View › 360° View (#15726).
+//! Background Eraser, Remove Tool and the Blur to Sponge tools) in View › 360° View (#15726). The Gradient and the
+//! Paint Bucket cover the whole latlong instead (`projected_fill`): the Gradient's live preview is the view's part
+//! of it.
 //!
 //! The document is resampled into the view once — the target layer (and its mask), every pixel
 //! layer when the tool samples all layers, and the selection — as a small temporary document. The
@@ -46,6 +48,8 @@ fn label_of(cmd: &str) -> Option<&'static str> {
         "paint.dodge" => "Dodge",
         "paint.burn" => "Burn",
         "paint.sponge" => "Sponge",
+        "paint.gradient" => "Gradient",
+        "paint.bucket" => "Paint Bucket",
         _ => return None,
     })
 }
@@ -176,6 +180,15 @@ impl ProjectedTool {
         match self.cmd.as_str() {
             // Selection-driven: the selection (and the offset in the params) say where.
             "paint.patch" | "paint.contentAwareMove" => {}
+            // Drawn in the view: from the first point to the last, measured on the sphere.
+            "paint.gradient" => {
+                let (a, b) = (points.first().copied().unwrap_or_default(), points.last().copied().unwrap_or_default());
+                crate::projected_fill::gradient_view(&mut self.temp, &p, &self.proj, [a[0], a[1]], [b[0], b[1]])?;
+                let doc = self.temp.active().ok_or(EngineError::NoDocument)?.doc.clone();
+                let post = crate::channel_cmds::read_target_surface(&doc, self.layer, &p)?.clone();
+                let damage = diff_bounds(&self.pre, &post, self.view);
+                return Ok((post, damage));
+            }
             _ => p["points"] = json!(points),
         }
         // The History Brush paints the state from the source half through the Clone Stamp.
@@ -236,6 +249,24 @@ pub fn projected_tool(s: &mut Session, p: &Value) -> Result<Value> {
                 .collect()
         })
         .unwrap_or_default();
+    // The Gradient and the Paint Bucket cover the whole latlong, not just the view.
+    if let Some(cmd @ ("paint.gradient" | "paint.bucket")) = p.get("command").and_then(Value::as_str) {
+        let (Some(a), Some(b)) = (points.first(), points.last()) else { return Err(bad("no points")) };
+        let params = p.get("params").cloned().unwrap_or_else(|| json!({}));
+        let vp = crate::projected_transform::projection_of(p, CMD)?;
+        let dmg = if cmd == "paint.gradient" {
+            crate::projected_fill::gradient(s, &params, &vp, [a[0], a[1]], [b[0], b[1]])?
+        } else {
+            let (iw, ih) = s.active().map(|d| (f64::from(d.doc.size.width), f64::from(d.doc.size.height))).ok_or(EngineError::NoDocument)?;
+            let [u, v] = vp.view_to_equirect(a[0].floor() + 0.5, a[1].floor() + 0.5, iw, ih);
+            let seed = ((u.floor() as i32).rem_euclid(iw as i32), (v.floor() as i32).clamp(0, ih as i32 - 1));
+            crate::projected_fill::bucket(s, &params, seed)?
+        };
+        if let Some(st) = s.active_mut() {
+            st.last_damage = Some(dmg);
+        }
+        return Ok(json!({"damage": [dmg.x0, dmg.y0, dmg.width(), dmg.height()]}));
+    }
     let mut t = ProjectedTool::new(s, p)?;
     if points.is_empty() && !matches!(t.cmd.as_str(), "paint.patch" | "paint.contentAwareMove") {
         return Err(bad("no points"));

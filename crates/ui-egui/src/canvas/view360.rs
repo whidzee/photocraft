@@ -19,8 +19,12 @@
 //!   in the view, and Edit › Paste lands the clipboard upright where you look (`view360_xform`).
 //! - The Pencil, Mixer Brush, Color Replacement, History Brush, Pattern Stamp, Background Eraser, Remove Tool and
 //!   the Blur to Sponge tools paint in the view through `paint.projectedTool`, as the Spot Healing Brush does.
-//! - The Eyedropper, Color Sampler, Count, Note, Paint Bucket, Magic Eraser and Red Eye tools act at the latlong
-//!   pixel under the click, through their flat commands; the samplers, count markers and notes show in the view.
+//! - The Eyedropper, Color Sampler, Count, Note, Magic Eraser and Red Eye tools act at the latlong pixel under the
+//!   click, through their flat commands; the samplers, count markers and notes show in the view. The Paint Bucket
+//!   floods from there across the ±180° seam, and the Gradient is dragged in the view and covers the whole sphere
+//!   (`paint.projectedTool`, `projected_fill`).
+//! - The Type and shape tools make new pixel layers upright where they're made in the view (`view360_draw`), and
+//!   the Pen tools draw and edit the Work Path on the sphere (`view360_path`).
 //! - Other tools don't work in the view yet; pressing with one says so in the status bar and does nothing else.
 //! - The Navigator outlines what the view sees on the flat image; a click there looks at that spot.
 //!
@@ -378,6 +382,10 @@ enum Gesture {
     Zoom,
     /// A click (the Eyedropper also a drag) at one latlong pixel.
     Point,
+    /// The Type and shape tools (`view360_draw`).
+    Draw,
+    /// The Pen tools (`view360_path`).
+    Path,
     Look,
     /// A tool the view has no use for yet: the press only says so.
     Unsupported,
@@ -387,12 +395,14 @@ fn gesture(tool: Tool, space: bool) -> Gesture {
     match tool {
         _ if space => Gesture::Look,
         Tool::Hand => Gesture::Look,
-        Tool::Brush | Tool::Eraser | Tool::CloneStamp | Tool::Healing | Tool::SpotHealing => Gesture::Paint,
+        Tool::Brush | Tool::Eraser | Tool::CloneStamp | Tool::Healing | Tool::SpotHealing | Tool::Gradient => Gesture::Paint,
         t if projects(t) => Gesture::Paint,
         Tool::Zoom => Gesture::Zoom,
         Tool::Move => Gesture::Move,
         t if super::view360_select::supported(t) => Gesture::Select,
         t if points(t) => Gesture::Point,
+        t if super::view360_draw::supported(t) => Gesture::Draw,
+        t if super::view360_path::supported(t) => Gesture::Path,
         _ => Gesture::Unsupported,
     }
 }
@@ -470,7 +480,8 @@ pub(crate) fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui, host: CanvasHost,
     }
 
     let tool = app.ui.tool;
-    let space = ctx.input(|i| i.key_down(egui::Key::Space));
+    // Space typed into the Type tool's text doesn't look around.
+    let space = ctx.input(|i| i.key_down(egui::Key::Space)) && !super::view360_draw::typing(&ctx, host.canvas_id());
     let gesture = gesture(tool, space);
     // Escape drops a stroke being drawn.
     if app.view360_stroke.is_some() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
@@ -498,7 +509,7 @@ pub(crate) fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui, host: CanvasHost,
     }
     // A Free Transform holds the view: no looking around while its box is up.
     let held = super::view360_xform::holds_view(app, idx);
-    let painting = (matches!(gesture, Gesture::Paint | Gesture::Select | Gesture::Move | Gesture::Point) && active) || held;
+    let painting = (matches!(gesture, Gesture::Paint | Gesture::Select | Gesture::Move | Gesture::Point | Gesture::Draw | Gesture::Path) && active) || held;
     // The left button looks around only with the Hand tool or Space, as it scrolls the flat canvas.
     let looks = !held && (response.dragged_by(PointerButton::Middle) || (response.dragged_by(PointerButton::Primary) && gesture == Gesture::Look));
     let grabbed = host.canvas_id().with("360-grab");
@@ -585,25 +596,13 @@ pub(crate) fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui, host: CanvasHost,
     let pass = super::view360_select::Pass { rect, ppp, look: &look, vp: &vp };
     super::view360_select::ants(app, &ctx, &painter, host.canvas_id(), idx, &pass);
     marks(app, &painter, rect, ppp, &vp, idx, &colors);
-    if held {
-        super::view360_xform::transform(app, &ctx, &response, &painter, rect, ppp, idx);
-    } else if painting && gesture == Gesture::Move {
-        super::view360_xform::move_tool(app, &ctx, &response, &painter, idx, &pass);
-    } else if painting && gesture == Gesture::Select {
-        super::view360_select::tool(app, &ctx, &response, &painter, host.canvas_id(), &pass);
-    } else if painting && gesture == Gesture::Point {
-        point(app, &ctx, &response, &pass);
-    } else if painting {
-        look = paint(app, &ctx, &response, &painter, &Frame { rect, look, vp, doc: doc.id });
-    } else if response.hovered() {
-        ctx.set_cursor_icon(match gesture {
-            Gesture::Zoom if ctx.input(|i| i.modifiers.alt) => egui::CursorIcon::ZoomOut,
-            Gesture::Zoom => egui::CursorIcon::ZoomIn,
-            Gesture::Unsupported if !response.dragged_by(PointerButton::Middle) => egui::CursorIcon::NotAllowed,
-            _ if response.dragged() => egui::CursorIcon::Grabbing,
-            _ => egui::CursorIcon::Grab,
-        });
+    super::view360_path::draw(app, &ctx, &painter, host.canvas_id(), idx, &pass, &colors);
+    // Text left typed when another tool is picked is placed.
+    if !matches!(tool, Tool::Type | Tool::VerticalType) {
+        super::view360_draw::finish_typing(app, &ctx, host.canvas_id(), &pass);
     }
+    let input = Input { response: &response, painter: &painter, canvas: host.canvas_id(), idx, gesture, held, painting };
+    look = run_tool(app, ui, &input, &pass, &Frame { rect, look, vp, doc: doc.id });
 
     // Where the camera looks, readable over any image.
     let readout = look.readout();
@@ -615,6 +614,55 @@ pub(crate) fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui, host: CanvasHost,
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Canvas, true, &name));
     view.projection = Some(look);
     view
+}
+
+/// What a pass hands the tool it runs: the view's response and painter, its canvas id and document, and what the
+/// press does.
+struct Input<'a> {
+    response: &'a egui::Response,
+    painter: &'a egui::Painter,
+    canvas: egui::Id,
+    idx: usize,
+    gesture: Gesture,
+    /// A Free Transform box is up.
+    held: bool,
+    /// The press works the selected tool rather than looking around.
+    painting: bool,
+}
+
+/// Runs the selected tool for a pass of the view, or sets the look-around cursor. Returns the camera, with any new
+/// Clone Stamp or Healing source.
+fn run_tool(app: &mut PhotocraftApp, ui: &mut egui::Ui, input: &Input<'_>, pass: &super::view360_select::Pass<'_>, frame: &Frame) -> SphereView {
+    let ctx = ui.ctx().clone();
+    let Input { response, painter, canvas, idx, gesture, held, painting } = *input;
+    let (rect, ppp) = (frame.rect, pass.ppp);
+    if held {
+        super::view360_xform::transform(app, &ctx, response, painter, rect, ppp, idx);
+    } else if painting && gesture == Gesture::Move {
+        super::view360_xform::move_tool(app, &ctx, response, painter, idx, pass);
+    } else if painting && gesture == Gesture::Select {
+        super::view360_select::tool(app, &ctx, response, painter, canvas, pass);
+    } else if painting && gesture == Gesture::Point {
+        point(app, &ctx, response, pass);
+    } else if painting && gesture == Gesture::Draw {
+        // A sizing pass lays the canvas out without input: the Type tool's field shows in the real one alone.
+        if !ui.is_sizing_pass() {
+            super::view360_draw::tool(app, ui, response, painter, canvas, pass);
+        }
+    } else if painting && gesture == Gesture::Path {
+        super::view360_path::tool(app, &ctx, response, canvas, pass);
+    } else if painting {
+        return paint(app, &ctx, response, painter, frame);
+    } else if response.hovered() {
+        ctx.set_cursor_icon(match gesture {
+            Gesture::Zoom if ctx.input(|i| i.modifiers.alt) => egui::CursorIcon::ZoomOut,
+            Gesture::Zoom => egui::CursorIcon::ZoomIn,
+            Gesture::Unsupported if !response.dragged_by(PointerButton::Middle) => egui::CursorIcon::NotAllowed,
+            _ if response.dragged() => egui::CursorIcon::Grabbing,
+            _ => egui::CursorIcon::Grab,
+        });
+    }
+    frame.look
 }
 
 /// What a 360° View pass shows: its rect, camera and projection, and its document.
@@ -638,6 +686,7 @@ fn paint(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Response
     let pressure = f64::from(app.stylus.pressure());
     let tool = app.ui.tool;
     let sources = matches!(tool, Tool::CloneStamp | Tool::Healing);
+    let gradient = tool == Tool::Gradient;
     let colors = colors(ctx);
     if sources && ctx.input(|i| i.modifiers.alt) {
         // Alt-click (or press) sets the source: a direction, so looking around keeps it.
@@ -706,6 +755,12 @@ fn paint(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Response
                     "projection": projection,
                 }),
             ),
+            Tool::Gradient => {
+                let o = &app.ui.tool_options;
+                let fill = json!({"style": o.gradient_style, "reverse": o.gradient_reverse, "dither": o.gradient_dither, "opacity": o.fill_opacity,
+                    "mode": o.gradient_blend_mode.label(), "target": target});
+                ("paint.projectedTool", json!({"command": "paint.gradient", "params": fill, "projection": projection}))
+            }
             t if projects(t) => {
                 let (command, params) = projected(app, t, &[[at[0], at[1], pressure]])?;
                 ("paint.projectedTool", json!({"command": command, "params": params, "projection": projection}))
@@ -747,13 +802,23 @@ fn paint(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Response
         && let Some(stroke) = app.view360_stroke.as_mut().filter(|s| s.doc == doc)
     {
         let [x, y] = to_view(p);
-        if stroke.points.last().is_none_or(|q| (q[0] - x).abs() + (q[1] - y).abs() > 0.25) {
+        if gradient {
+            // The Gradient runs from the press to the pointer.
+            if stroke.points.get(1).is_none_or(|q| q[0] != x || q[1] != y) {
+                stroke.points.truncate(1);
+                stroke.points.push([x, y, 1.0]);
+                stroke.rendered = 0;
+            }
+        } else if stroke.points.last().is_none_or(|q| (q[0] - x).abs() + (q[1] - y).abs() > 0.25) {
             stroke.points.push([x, y, pressure]);
         }
     }
     let finished = if response.drag_stopped_by(PointerButton::Primary) {
-        app.view360_stroke.take().filter(|s| s.doc == doc)
-    } else if response.clicked() {
+        // A Gradient too short to have a direction paints nothing.
+        app.view360_stroke.take().filter(|s| s.doc == doc).filter(|s| {
+            !gradient || s.points.first().zip(s.points.get(1)).is_some_and(|(a, b)| (a[0] - b[0]).abs() + (a[1] - b[1]).abs() >= 2.0)
+        })
+    } else if response.clicked() && !gradient {
         // A click is one dab.
         response.interact_pointer_pos().and_then(|p| start(app, to_view(p)))
     } else {
@@ -761,6 +826,11 @@ fn paint(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Response
     };
     if let Some(stroke) = app.view360_stroke.as_mut().filter(|s| s.doc == doc) {
         stroke.draw(ctx, painter, rect, ppp);
+        if let (true, Some(a), Some(b)) = (gradient, stroke.points.first(), stroke.points.get(1)) {
+            let at = |q: &[f64; 3]| rect.min + vec2(q[0] as f32, q[1] as f32) / ppp;
+            painter.line_segment([at(a), at(b)], Stroke::new(3.0, colors.halo));
+            painter.line_segment([at(a), at(b)], Stroke::new(1.0, colors.line));
+        }
     }
     if let Some(mut stroke) = finished {
         // The stroke stays on screen in the pass it is committed in.
@@ -796,7 +866,11 @@ fn paint(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Response
             }
         }
     }
-    if let Some(h) = response.hover_pos().filter(|_| response.hovered()) {
+    if gradient {
+        if response.hovered() {
+            ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
+        }
+    } else if let Some(h) = response.hover_pos().filter(|_| response.hovered()) {
         let r = (app.session.tools.brush.size / ppp / 2.0).max(1.0);
         painter.circle_stroke(h, r + 1.0, Stroke::new(1.0, colors.halo));
         painter.circle_stroke(h, r, Stroke::new(1.0, colors.line));
@@ -909,6 +983,13 @@ fn point(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Response
         Tool::RedEye => {
             crate::canvas::tools::retouch::red_eye_click(app, at);
             Ok(())
+        }
+        // The bucket floods the latlong across the ±180° seam.
+        Tool::PaintBucket => {
+            let [x, y] = pass.to_view(p);
+            let params = crate::canvas::paint_tool::bucket_params(app);
+            app.run("paint.projectedTool", json!({"command": "paint.bucket", "params": params, "points": [[x, y, 1.0]], "projection": pass.projection()}))
+                .map(|_| ())
         }
         _ => {
             crate::canvas::paint_tool::click_tool(app, tool, at);

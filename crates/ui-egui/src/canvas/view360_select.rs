@@ -75,7 +75,7 @@ impl Pass<'_> {
         self.rect.min + vec2(q[0] as f32, q[1] as f32) / self.ppp
     }
 
-    fn projection(&self) -> Value {
+    pub(crate) fn projection(&self) -> Value {
         json!({"yaw": self.look.yaw, "pitch": self.look.pitch, "fov": self.look.fov, "width": self.vp.w, "height": self.vp.h})
     }
 }

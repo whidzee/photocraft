@@ -187,25 +187,30 @@ fn with_resize<R>(app: &mut PhotocraftApp, f: impl FnOnce(&mut crate::brush_resi
 
 /// A press the paint tool takes: the resize chord, the HUD Color Picker, a Mixer Brush load (a click
 /// that is done at once), or a stroke.
+/// `paint.bucket` params from the options bar, without where it is clicked.
+pub(crate) fn bucket_params(app: &PhotocraftApp) -> serde_json::Value {
+    let o = &app.ui.tool_options;
+    let contents = if o.bucket_fill_pattern { "pattern" } else { "foreground" };
+    let mode = if o.bucket_clear { "clear" } else { o.bucket_blend_mode.label() };
+    json!({
+        "tolerance": o.tolerance,
+        "contiguous": o.contiguous,
+        "antiAlias": o.anti_alias,
+        "sampleAllLayers": o.sample_all.paint_bucket,
+        "opacity": o.fill_opacity,
+        "contents": contents,
+        "mode": mode,
+        "target": paint_target(app),
+    })
+}
+
 /// A Paint Bucket or Magic Eraser press: the fill or the erase runs at the clicked pixel. Returns false for any other tool.
 pub(crate) fn click_tool(app: &mut PhotocraftApp, tool: Tool, at: [f64; 2]) -> bool {
     match tool {
         Tool::PaintBucket => {
-            let o = app.ui.tool_options.clone();
-            let contents = if o.bucket_fill_pattern { "pattern" } else { "foreground" };
-            let mode = if o.bucket_clear { "clear" } else { o.bucket_blend_mode.label() };
-            let params = json!({
-                "x": at[0].floor(),
-                "y": at[1].floor(),
-                "tolerance": o.tolerance,
-                "contiguous": o.contiguous,
-                "antiAlias": o.anti_alias,
-                "sampleAllLayers": o.sample_all.paint_bucket,
-                "opacity": o.fill_opacity,
-                "contents": contents,
-                "mode": mode,
-                "target": paint_target(app),
-            });
+            let mut params = bucket_params(app);
+            params["x"] = json!(at[0].floor());
+            params["y"] = json!(at[1].floor());
             match app.run("paint.bucket", params) {
                 // A Bitmap document answers with the reference's alert (#12536), once however many clicks arrive
                 // while it is open; no status-bar error as well.

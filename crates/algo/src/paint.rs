@@ -162,14 +162,35 @@ pub fn paint_gradient(
     selection: Option<&Surface>,
     lock_transparency: bool,
 ) {
+    let fill = GradientFill { stops, reverse, opacity, blend_mode, dither, selection, lock_transparency };
+    // Sampled one pixel up and left of the pixel centre, where the reference application samples (#12018).
+    paint_gradient_by(s, area, |x, y| tool_gradient_t(shape, from, to, x as f32 - 0.5, y as f32 - 0.5), &fill);
+}
+
+/// How a gradient paints, apart from where each pixel sits along it: its stops, direction, opacity, blend mode,
+/// dither, the selection it is clipped by, and whether the layer's transparency is locked.
+#[derive(Clone, Copy)]
+pub struct GradientFill<'a> {
+    pub stops: &'a [(f32, [f32; 4])],
+    pub reverse: bool,
+    pub opacity: f32,
+    pub blend_mode: BlendMode,
+    pub dither: bool,
+    pub selection: Option<&'a Surface>,
+    pub lock_transparency: bool,
+}
+
+/// [`paint_gradient`] with each pixel's position along the gradient, 0 to 1, given by `t_at(x, y)`: View › 360°
+/// View's Gradient measures it on the sphere, so it covers the whole latlong.
+pub fn paint_gradient_by(s: &mut Surface, area: Rect, t_at: impl Fn(i32, i32) -> f32 + Sync, fill: &GradientFill<'_>) {
+    let GradientFill { stops, reverse, opacity, blend_mode, dither, selection, lock_transparency } = *fill;
     composite_area(
         s,
         area,
         FillMode::Blend(blend_mode),
         |x, y| opacity * selection.map_or(1.0, |m| m.sample_channel(x, y, 0)),
         |x, y| {
-            // Sampled one pixel up and left of the pixel centre, where the reference application samples (#12018).
-            let t = tool_gradient_t(shape, from, to, x as f32 - 0.5, y as f32 - 0.5);
+            let t = t_at(x, y).clamp(0.0, 1.0);
             let mut c = sample_stops(stops, if reverse { 1.0 - t } else { t });
             if dither {
                 // One quantisation step of monochromatic noise breaks 8-bit banding without speckle.

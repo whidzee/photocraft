@@ -534,6 +534,15 @@ fn rows_of(proj: &ViewProjection, rects: &[[f64; 4]], iw: u32, ih: u32) -> Optio
     (v.0 < v.1).then(|| (v.0.max(0) as i32, v.1.min(i64::from(ih)) as i32))
 }
 
+/// The History label and the name of a layer [`place_new_layer`] makes, and whether the selection stays.
+pub(crate) struct NewLayer<'a> {
+    pub label: &'a str,
+    /// The next "Layer n" when `None`.
+    pub name: Option<String>,
+    /// Paste drops the selection; the Type and shape tools leave it as it is.
+    pub keep_selection: bool,
+}
+
 /// A new layer above the active one holding `src` over `cb` mapped onto the view `quad`
 /// (Paste, and the Type and shape tools' rendered layers).
 pub(crate) fn place_new_layer(
@@ -542,9 +551,9 @@ pub(crate) fn place_new_layer(
     cb: Rect,
     quad: [[f64; 2]; 4],
     proj: &ViewProjection,
-    label: &str,
-    name: Option<String>,
+    layer: NewLayer<'_>,
 ) -> Result<photocraft_doc::LayerId> {
+    let NewLayer { label, name, keep_selection } = layer;
     const CMD: &str = "layer.projectedPlace";
     let proj = *proj;
     let st = s.active().ok_or(EngineError::NoDocument)?;
@@ -608,12 +617,56 @@ pub(crate) fn place_new_layer(
             *crate::pixels_mut(&mut l)? = out;
             let id = doc.insert_above(*active, l);
             *active = Some(id);
-            doc.selection = None;
+            if !keep_selection {
+                doc.selection = None;
+            }
             Ok(id)
         })?;
         // A single edit reports its own damage (the canvas redraws the whole command since #10053).
         Ok(id)
     }
+}
+
+/// `layer.projectedRender`: the Type and shape tools in View › 360° View. `command` (`type.create` or `shape.create`)
+/// runs with its `params` in view pixels on a transparent document the size of the view; the layer it makes is
+/// rasterized there and placed upright where it was drawn in the view, as a new pixel layer named after it. A latlong
+/// can't hold an editable text or shape layer that looks right on the sphere.
+pub fn projected_render(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "layer.projectedRender";
+    let proj = projection_of(p, CMD)?;
+    let cmd = p.get("command").and_then(Value::as_str).ok_or_else(|| bad(CMD, "missing `command`"))?;
+    let (raster, label) = match cmd {
+        "type.create" => ("type.rasterize", "Type"),
+        "shape.create" => ("shape.rasterize", "Shape"),
+        _ => return Err(bad(CMD, "`command` must be type.create or shape.create")),
+    };
+    let st = s.active().ok_or(EngineError::NoDocument)?;
+    let depth = match st.doc.pixel_format().sample {
+        photocraft_color::SampleType::F32 => 32,
+        photocraft_color::SampleType::U16 => 16,
+        _ => 8,
+    };
+    let mut temp = Session::new();
+    temp.tools = s.tools.clone();
+    temp.patterns = s.patterns.clone();
+    temp.type_defaults = s.type_defaults.clone();
+    temp.execute("file.new", json!({"width": proj.w.round(), "height": proj.h.round(), "depth": depth, "background": "transparent"}))?;
+    let made = temp.execute(cmd, p.get("params").cloned().unwrap_or_else(|| json!({})))?;
+    let id = made.get("layer").and_then(Value::as_u64).ok_or_else(|| EngineError::Other(format!("{cmd} made no layer")))?;
+    temp.execute(raster, json!({"layer": id}))?;
+    let td = temp.active().ok_or(EngineError::NoDocument)?;
+    let lid = td.active_layer.ok_or_else(|| EngineError::Other("no layer".into()))?;
+    let layer = td.doc.layer(lid).ok_or(EngineError::NoLayer(lid))?;
+    let name = layer.name.clone();
+    let surf = layer.surface().ok_or_else(|| EngineError::Other("nothing rendered".into()))?.clone();
+    let cb = surf.content_bounds();
+    if cb.is_empty() {
+        return Err(EngineError::Other("nothing to place: the text or shape is empty".into()));
+    }
+    let (x0, y0, x1, y1) = (f64::from(cb.x0), f64::from(cb.y0), f64::from(cb.x1), f64::from(cb.y1));
+    let quad = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+    let id = place_new_layer(s, &surf, cb, quad, &proj, NewLayer { label, name: Some(name), keep_selection: true })?;
+    Ok(json!({"layer": id.0}))
 }
 
 /// `layer.projectedPlace` — see the module docs.
@@ -629,7 +682,7 @@ pub fn projected_place(s: &mut Session, p: &Value) -> Result<Value> {
         let clip = (*s.clipboard).clone().ok_or_else(|| EngineError::Other("the clipboard is empty".into()))?;
         let cb = clip.surface.content_bounds();
         let cb = if cb.is_empty() { clip.bounds } else { cb };
-        let id = place_new_layer(s, &clip.surface, cb, quad, &proj, "Paste", None)?;
+        let id = place_new_layer(s, &clip.surface, cb, quad, &proj, NewLayer { label: "Paste", name: None, keep_selection: false })?;
         return Ok(json!({"layer": id.0}));
     }
     // The active layer's content inside `rect` (view px).
@@ -1114,5 +1167,37 @@ mod rotate_panorama_tests {
         };
         assert!(px(u, v)[1] < 0.2, "the red is where it was sent: {:?}", px(u, v));
         assert!(px(ahead[0], ahead[1])[1] > 0.5, "and gone from where it was");
+    }
+}
+
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+
+    /// A rectangle drawn in a view looking up and to the side lands on the latlong where the view saw it, as a new
+    /// layer: filled inside, out to its corners, and nowhere past them.
+    #[test]
+    fn a_shape_drawn_in_the_view_lands_upright_on_an_f32_latlong() {
+        let mut s = crate::session();
+        s.execute("file.new", json!({"width": 2048, "height": 1024, "depth": 32})).unwrap();
+        let view = json!({"yaw": 30.0, "pitch": 40.0, "fov": 60.0, "width": 800, "height": 600});
+        let vp = ViewProjection::new(Camera { yaw: 30.0, pitch: 40.0, fov: 60.0 }, 800.0, 600.0);
+        let n = s.active().unwrap().doc.walk().len();
+        s.execute(
+            "layer.projectedRender",
+            json!({"command": "shape.create", "params": {"kind": "rect", "rect": [300, 250, 200, 100], "fill": "#ff0000"}, "projection": view}),
+        )
+        .unwrap();
+        assert_eq!(s.active().unwrap().doc.walk().len(), n + 1, "one new layer");
+        let d = s.active().unwrap();
+        let surf = d.doc.layer(d.active_layer.unwrap()).unwrap().surface().unwrap();
+        let at = |x: f64, y: f64| {
+            let [u, v] = vp.view_to_equirect(x, y, 2048.0, 1024.0);
+            surf.rgba(u as i32, v as i32)
+        };
+        let (inside, corner, out) = (at(400.0, 300.0), at(305.0, 255.0), at(520.0, 300.0));
+        assert!(inside[0] > 0.9 && inside[3] > 0.99, "{inside:?}");
+        assert!(corner[3] > 0.9, "the view rect's corner is filled: {corner:?}");
+        assert!(out[3] < 0.01, "{out:?}");
     }
 }

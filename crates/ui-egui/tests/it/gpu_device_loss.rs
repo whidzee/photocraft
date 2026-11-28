@@ -420,6 +420,7 @@ mod gpu_tests {
                     hdr: None,
                     projection: None,
                     sphere_turn: None,
+                    sphere_gradient: None,
                 },
             }
         });

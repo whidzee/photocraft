@@ -73,8 +73,8 @@ pub(crate) use params::{layer_id, nums, op_from, pt};
 pub use params::{parse_path, parse_stroke, path_json};
 pub use paths::STROKE_PATH_TOOLS;
 use paths::{
-    clipping_path_clear, clipping_path_set, path_delete, path_fill, path_rename, path_stroke, path_to_selection, path_to_selection_with_mode,
-    path_transform, paths_list, resolve_path, select_to_work_path,
+    clipping_path_clear, clipping_path_set, path_delete, path_fill, path_rename, path_stroke, path_to_selection, path_to_selection_with_mode, path_transform,
+    paths_list, resolve_path, select_to_work_path,
 };
 pub(crate) use paths::{is_work, path_mut, path_set};
 pub(crate) use shape::{bake_path, map_path, map_shape, shift_shape, translate_vectors_wrapped, with_shape};

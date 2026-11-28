@@ -217,11 +217,7 @@ pub(crate) fn tool(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui
     {
         let q = pass.to_view(p);
         let patch = tool == Tool::Patch && !modifiers.shift && !modifiers.alt && in_selection(app, pass.vp, q);
-        let d = if patch {
-            Drag::Patch { start: q }
-        } else {
-            Drag::Shape { mode: shape_mode(app, tool, modifiers), points: vec![q] }
-        };
+        let d = if patch { Drag::Patch { start: q } } else { Drag::Shape { mode: shape_mode(app, tool, modifiers), points: vec![q] } };
         ctx.data_mut(|x| x.insert_temp(id, d));
     } else if response.clicked_by(PointerButton::Primary) && drag.is_none() {
         // A Quick Selection click is one dab; a click with a marquee or a lasso has no shape.

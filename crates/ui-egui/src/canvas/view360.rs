@@ -244,8 +244,11 @@ pub(crate) struct Stroke360 {
     rotation: Option<Rot>,
     points: Vec<[f64; 3]>,
     preview: Preview,
+    /// The Gradient as the sphere shader draws it while it is dragged; `None` while the CPU preview shows it.
+    gpu: Option<crate::gpu_canvas::SphereGradient>,
+    /// The stroke so far over the whole view, updated a rect at a time.
     texture: Option<egui::TextureHandle>,
-    /// The view device pixels the texture covers.
+    /// The view device pixels the last update covered.
     shown: Option<photocraft_geom::Rect>,
     /// How many points the texture shows.
     rendered: usize,
@@ -262,6 +265,12 @@ impl Stroke360 {
         // A retouch tool re-runs on the whole view: at most every 50 ms.
         let floor = if matches!(self.preview, Preview::Tool(_)) { 0.05 } else { 0.0 };
         let wait = if self.cost > 0.04 { self.cost.max(floor) } else { floor };
+        if self.gpu.is_some() {
+            // The sphere shader draws the Gradient: nothing to render here.
+            self.rendered = self.points.len();
+            self.texture = None;
+            self.shown = None;
+        }
         if self.rendered != self.points.len() && now - self.last >= wait {
             self.rendered = self.points.len();
             self.last = now;
@@ -272,29 +281,83 @@ impl Stroke360 {
             };
             self.cost = (crate::gpu_canvas::now_ms() - started) / 1000.0;
             if let Some(o) = overlay {
-                let size = [o.rect.width() as usize, o.rect.height() as usize];
-                let image = egui::ColorImage::from_rgba_unmultiplied(size, o.px.as_flattened());
-                match &mut self.texture {
-                    Some(t) => t.set(image, egui::TextureOptions::LINEAR),
-                    None => self.texture = Some(ctx.load_texture("pc-360-stroke", image, egui::TextureOptions::LINEAR)),
-                }
-                self.shown = Some(o.rect);
+                self.upload(ctx, &o);
             }
         }
         if self.rendered != self.points.len() {
             ctx.request_repaint();
         }
-        if let (Some(t), Some(r)) = (&self.texture, self.shown) {
-            let at = Rect::from_min_size(rect.min + vec2(r.x0 as f32, r.y0 as f32) / ppp, vec2(r.width() as f32, r.height() as f32) / ppp);
+        if let Some(t) = &self.texture {
+            let [w, h] = t.size();
+            let at = Rect::from_min_size(rect.min, vec2(w as f32, h as f32) / ppp);
             painter.image(t.id(), at, Rect::from_min_max(Pos2::ZERO, egui::pos2(1.0, 1.0)), Color32::WHITE);
         }
     }
+
+    /// Puts an update's overlay into the view-sized texture, sending only the rect it covers. The Brush, Eraser and
+    /// Clone Stamp hand back just what changed; a tool re-run on the view hands back all it changed, so the rect it
+    /// covered last time and no longer does is cleared too.
+    fn upload(&mut self, ctx: &egui::Context, o: &photocraft_engine::brush_cmds::PreviewOverlay) {
+        let Some(view) = self.view_size() else { return };
+        let r = match (&self.preview, self.shown) {
+            (Preview::Tool(_), Some(last)) => last.union(&o.rect),
+            _ => o.rect,
+        }
+        .intersect(&photocraft_geom::Rect::new(0, 0, view[0] as i32, view[1] as i32));
+        if r.is_empty() {
+            return;
+        }
+        let (w, h) = (r.width() as usize, r.height() as usize);
+        let mut px = vec![Color32::TRANSPARENT; w * h];
+        let ow = o.rect.width() as usize;
+        for (i, p) in o.px.iter().enumerate() {
+            let (x, y) = (o.rect.x0 + (i % ow) as i32 - r.x0, o.rect.y0 + (i / ow) as i32 - r.y0);
+            if x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h {
+                px[y as usize * w + x as usize] = Color32::from_rgba_unmultiplied(p[0], p[1], p[2], p[3]);
+            }
+        }
+        let image = egui::ColorImage { size: [w, h], source_size: vec2(w as f32, h as f32), pixels: px };
+        let texture = self
+            .texture
+            .get_or_insert_with(|| ctx.load_texture("pc-360-stroke", egui::ColorImage::filled(view, Color32::TRANSPARENT), egui::TextureOptions::LINEAR));
+        texture.set_partial([r.x0 as usize, r.y0 as usize], image, egui::TextureOptions::LINEAR);
+        self.shown = Some(match (&self.preview, self.shown) {
+            (Preview::Tool(_), _) => o.rect,
+            (_, Some(last)) => last.union(&o.rect),
+            _ => o.rect,
+        });
+    }
+
+    /// The view's size in device pixels, from the stroke's `projection`.
+    fn view_size(&self) -> Option<[usize; 2]> {
+        let q = self.params.get("projection")?;
+        let (w, h) = (q.get("width")?.as_f64()?, q.get("height")?.as_f64()?);
+        (w >= 1.0 && h >= 1.0).then(|| [w.round() as usize, h.round() as usize])
+    }
+}
+
+/// The Gradient dragged from `from` to `to` (view device pixels) as the sphere shader can draw it, when it can show
+/// it as the release paints it (`projected_fill::gradient_look`).
+fn gradient_look(
+    session: &photocraft_engine::Session,
+    params: &Value,
+    vp: &ViewProjection,
+    from: [f64; 3],
+    to: [f64; 2],
+) -> Option<crate::gpu_canvas::SphereGradient> {
+    let fill = params.get("params")?;
+    let look = photocraft_engine::projected_fill::gradient_look(session, fill, vp, [from[0], from[1]], to)?;
+    let mut colors = [[0.0; 4]; crate::gpu_canvas::SPHERE_GRADIENT_COLORS];
+    for (c, l) in colors.iter_mut().zip(&look.colors) {
+        *c = *l;
+    }
+    Some(crate::gpu_canvas::SphereGradient { axes: look.axes, shape: look.shape, colors })
 }
 
 /// What shows a stroke while it is drawn.
 enum Preview {
     /// Brush, Eraser, Clone Stamp: the brush engine on the view.
-    Stroke(ProjectedPreview),
+    Stroke(Box<ProjectedPreview>),
     /// Healing Brush and Spot Healing Brush: the flat tool re-run on the resampled view.
     Tool(Box<ProjectedTool>),
 }
@@ -405,6 +468,11 @@ fn gesture(tool: Tool, space: bool) -> Gesture {
         t if super::view360_path::supported(t) => Gesture::Path,
         _ => Gesture::Unsupported,
     }
+}
+
+/// Whether `tool` does something in the view: the tools that don't are greyed out in the toolbar while it is on.
+pub(crate) fn works(tool: Tool) -> bool {
+    gesture(tool, false) != Gesture::Unsupported
 }
 
 /// The painting and retouch tools that run their flat command on the view through `paint.projectedTool`.
@@ -575,11 +643,16 @@ pub(crate) fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui, host: CanvasHost,
             projection: Some([look.yaw, look.pitch, look.fov]),
             // Image › Rotate Panorama's preview: the content turned, before it is applied.
             sphere_turn: crate::dialogs::rotate_panorama::preview(app).map(|q| quaternion(&transpose(&q))),
+            // The Gradient being dragged, when the shader can show it as the release paints it.
+            sphere_gradient: app.view360_stroke.as_ref().filter(|s| s.doc == doc.id).and_then(|s| s.gpu),
         };
         crate::gpu_canvas::GpuCanvas::paint(&painter, rect, params);
         // The Navigator draws the same texture flat.
         if app.navigator_plain.contains(&doc.id) {
-            app.navigator_gpu.insert(doc.id, crate::gpu_canvas::ViewParams { projection: None, sphere_turn: None, view_key: params.view_key ^ 1, ..params });
+            app.navigator_gpu.insert(
+                doc.id,
+                crate::gpu_canvas::ViewParams { projection: None, sphere_turn: None, sphere_gradient: None, view_key: params.view_key ^ 1, ..params },
+            );
         }
     } else {
         app.navigator_gpu.remove(&doc.id);
@@ -604,6 +677,8 @@ pub(crate) fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui, host: CanvasHost,
     let input = Input { response: &response, painter: &painter, canvas: host.canvas_id(), idx, gesture, held, painting };
     look = run_tool(app, ui, &input, &pass, &Frame { rect, look, vp, doc: doc.id });
 
+    look_hint(app, ui, rect, looks);
+
     // Where the camera looks, readable over any image.
     let readout = look.readout();
     let badge = Rect::from_min_max(rect.left_bottom() + vec2(8.0, -40.0), rect.right_bottom() + vec2(-8.0, -8.0));
@@ -614,6 +689,28 @@ pub(crate) fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui, host: CanvasHost,
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Canvas, true, &name));
     view.projection = Some(look);
     view
+}
+
+/// The preference that remembers the look-around hint was seen.
+pub(crate) const LOOK_HINT: &str = "view.view360.lookHint";
+
+/// The first time a 360° View is on, a note at the top of the view says how to look around now that a left drag
+/// works the tools. "Got it", or looking around once, puts it away for good.
+fn look_hint(app: &mut PhotocraftApp, ui: &mut egui::Ui, rect: Rect, looked: bool) {
+    if crate::dialogs::alerts::dismissed(app, LOOK_HINT) {
+        return;
+    }
+    let mut seen = looked;
+    let at = Rect::from_min_size(rect.center_top() + vec2(-220.0, 12.0), vec2(440.0, 120.0)).intersect(rect);
+    ui.scope_builder(egui::UiBuilder::new().max_rect(at), |ui| {
+        let message = tl!("Drag with the middle mouse button, or hold Space and drag, to look around. A left drag uses the selected tool.");
+        // On its own surface: the note sits over whatever the image shows.
+        let out = Notice::new(Tone::Info, message).layout(NoticeLayout::Card).action(craft::ui::notices::NoticeAction::new(tl!("Got it"))).show(ui);
+        seen |= out.action.is_some() || out.dismissed;
+    });
+    if seen {
+        crate::dialogs::alerts::remember_skip(app, LOOK_HINT);
+    }
 }
 
 /// What a pass hands the tool it runs: the view's response and painter, its canvas id and document, and what the
@@ -769,8 +866,8 @@ fn paint(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Response
         };
         let preview = match command {
             "paint.projectedTool" => ProjectedTool::new(&app.session, &params).map(|t| Preview::Tool(Box::new(t))),
-            "paint.projectedClone" => photocraft_engine::retouch_cmds::projected_clone_preview(&app.session, &params).map(Preview::Stroke),
-            _ => ProjectedPreview::brush(&app.session, &params).map(Preview::Stroke),
+            "paint.projectedClone" => photocraft_engine::retouch_cmds::projected_clone_preview(&app.session, &params).map(|p| Preview::Stroke(Box::new(p))),
+            _ => ProjectedPreview::brush(&app.session, &params).map(|p| Preview::Stroke(Box::new(p))),
         };
         match preview {
             Ok(preview) => Some(Stroke360 {
@@ -780,6 +877,7 @@ fn paint(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Response
                 rotation,
                 points: vec![[at[0], at[1], pressure]],
                 preview,
+                gpu: None,
                 texture: None,
                 shown: None,
                 rendered: 0,
@@ -808,6 +906,7 @@ fn paint(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Response
                 stroke.points.truncate(1);
                 stroke.points.push([x, y, 1.0]);
                 stroke.rendered = 0;
+                stroke.gpu = gradient_look(&app.session, &stroke.params, vp, stroke.points[0], [x, y]);
             }
         } else if stroke.points.last().is_none_or(|q| (q[0] - x).abs() + (q[1] - y).abs() > 0.25) {
             stroke.points.push([x, y, pressure]);
@@ -815,9 +914,10 @@ fn paint(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Response
     }
     let finished = if response.drag_stopped_by(PointerButton::Primary) {
         // A Gradient too short to have a direction paints nothing.
-        app.view360_stroke.take().filter(|s| s.doc == doc).filter(|s| {
-            !gradient || s.points.first().zip(s.points.get(1)).is_some_and(|(a, b)| (a[0] - b[0]).abs() + (a[1] - b[1]).abs() >= 2.0)
-        })
+        app.view360_stroke
+            .take()
+            .filter(|s| s.doc == doc)
+            .filter(|s| !gradient || s.points.first().zip(s.points.get(1)).is_some_and(|(a, b)| (a[0] - b[0]).abs() + (a[1] - b[1]).abs() >= 2.0))
     } else if response.clicked() && !gradient {
         // A click is one dab.
         response.interact_pointer_pos().and_then(|p| start(app, to_view(p)))

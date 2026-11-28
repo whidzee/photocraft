@@ -138,8 +138,8 @@ fn a_navigator_drag_turns_the_view_steadily() {
     }
 }
 
-/// Text typed after a click with the Type tool in the whole app goes into its field, not to the tool shortcuts, and
-/// Enter places it as a new layer.
+/// Text typed after a click with the Type tool in the whole app goes into its field, not to the tool shortcuts;
+/// Enter starts a new line and Ctrl+Enter (Cmd+Return on a Mac) places the text as a new layer.
 #[test]
 fn typed_text_is_placed_as_a_new_layer() {
     let mut h = Harness::builder().with_size(vec2(1280.0, 800.0)).with_step_dt(1.0 / 60.0).with_max_steps(64).build_eframe(|cc| {
@@ -166,6 +166,36 @@ fn typed_text_is_placed_as_a_new_layer() {
     h.run_steps(2);
     h.key_press(egui::Key::Enter);
     h.run_steps(3);
+    assert_eq!(h.state().session.documents()[0].doc.walk().len(), layers, "Enter starts a new line");
+    h.event(egui::Event::Text("again".into()));
+    h.run_steps(2);
+    h.key_press_modifiers(Modifiers::COMMAND, egui::Key::Enter);
+    h.run_steps(3);
     assert_eq!(h.state().ui.tool, Tool::Type, "typing picked no tool");
     assert_eq!(h.state().session.documents()[0].doc.walk().len(), layers + 1, "{}", h.state().ui.status);
+}
+
+/// While 360° View is on, the toolbar greys out the tools that don't work in it yet and leaves the rest alone.
+#[test]
+fn the_toolbar_greys_out_tools_the_view_cannot_use() {
+    use egui_kittest::kittest::{NodeT as _, Queryable as _};
+    let mut h = Harness::builder().with_size(vec2(1280.0, 800.0)).with_step_dt(1.0 / 60.0).with_max_steps(64).build_eframe(|cc| {
+        PhotocraftApp::setup_context(&cc.egui_ctx, Default::default());
+        let mut session = photocraft_engine::Session::new();
+        session.edit_prefs(|p| p.general.auto_show_home_screen = false);
+        let mut app = PhotocraftApp::with_context(cc.egui_ctx.clone(), session, crate::Services::default());
+        app.run("file.new", json!({"width": 2048, "height": 1024})).unwrap();
+        app.sync_views();
+        app
+    });
+    h.run_steps(6);
+    // The toolbar's button for a tool (and the flyout's row, where it shows).
+    fn greyed<S>(h: &Harness<'_, S>, name: &str) -> bool {
+        h.query_all_by_label(name).any(|n| n.accesskit_node().is_disabled())
+    }
+    assert!(!greyed(&h, "Crop Tool"), "flat: every tool works");
+    super::view360::command(h.state_mut(), &json!({"on": true})).unwrap();
+    h.run_steps(6);
+    assert!(greyed(&h, "Crop Tool"), "360: the Crop tool is greyed out");
+    assert!(!greyed(&h, "Brush Tool") && h.query_all_by_label("Brush Tool").next().is_some(), "360: the Brush is not");
 }

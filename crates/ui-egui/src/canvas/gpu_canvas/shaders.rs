@@ -8,6 +8,13 @@ struct View {
     f: vec4<f32>, // 360° View turn quaternion xyz, 32-bit preview gain (2^exposure; 0 = off)
     g: vec4<f32>, // gamut warning rgb, 32-bit preview 1 / gamma
     h: vec4<f32>, // cos, sin, center_doc_x, center_doc_y
+    // 360° View's Gradient being dragged: start direction and angle, along tangent and length, across direction and
+    // Radial length, (on, shape), then its colours from start to end (straight RGBA, opacity in alpha).
+    ga: vec4<f32>,
+    gc: vec4<f32>,
+    ge: vec4<f32>,
+    gm: vec4<f32>,
+    gcol: array<vec4<f32>, 64>,
 };
 struct Tile { r: vec4<f32>, core: vec4<f32> }; // x, y, w, h in doc px; drawn x0, y0, x1, y1
 
@@ -187,6 +194,29 @@ fn proj_lod(k: f32, dx: f32, dy: f32, lat: f32, size: vec2<f32>) -> f32 {
     return max(log2(max(fp, 1e-6)) - 0.5, 0.0);
 }
 
+// The 360° View Gradient's colour in direction `d` (photocraft_engine::projected_fill::SphereGradient::t).
+fn sphere_gradient(d: vec3<f32>) -> vec4<f32> {
+    let along = asin(clamp(dot(d, view.gc.xyz), -1.0, 1.0)) - view.ga.w;
+    let across = asin(clamp(dot(d, view.ge.xyz), -1.0, 1.0));
+    let shape = view.gm.y;
+    var t: f32;
+    if (shape < 0.5) {
+        t = along / view.gc.w;
+    } else if (shape < 1.5) {
+        t = acos(clamp(dot(d, view.ga.xyz), -1.0, 1.0)) / view.ge.w;
+    } else if (shape < 2.5) {
+        let a = atan2(across, along) / (2.0 * PI);
+        t = a - floor(a);
+    } else if (shape < 3.5) {
+        t = abs(along) / view.gc.w;
+    } else {
+        t = (abs(along) + abs(across)) / view.gc.w;
+    }
+    let k = clamp(t, 0.0, 1.0) * 63.0;
+    let i = u32(floor(k));
+    return mix(view.gcol[i], view.gcol[min(i + 1u, 63u)], k - floor(k));
+}
+
 // The document as a latlong panorama seen from the centre of the sphere (photocraft_engine::equirect: the view
 // pixel's direction, then its longitude and latitude).
 @fragment
@@ -202,6 +232,7 @@ fn fs_proj(in: VOut) -> @location(0) vec4<f32> {
     let r = vec3(cy, 0.0, -sy);
     let u = vec3(-sp * sy, cp, -sp * cy);
     var dir = normalize(f + dx * r + dy * u);
+    let seen = dir;
     // Image › Rotate Panorama's preview: the content this direction will show once applied.
     let q = view.f.xyz;
     dir = dir + 2.0 * cross(q, cross(q, dir) + view.c.w * dir);
@@ -215,6 +246,11 @@ fn fs_proj(in: VOut) -> @location(0) vec4<f32> {
     // Each tile's draw covers its share of the view: only the directions that land in the tile are its own.
     if (any(t < vec2(0.0)) || any(t >= tile.r.zw) || any(d < tile.core.xy) || any(d >= tile.core.zw)) { discard; }
     var col = textureSampleLevel(tex, samp, t / tile.r.zw, proj_lod(k, dx, dy, lat, size));
+    if (view.gm.x > 0.5) {
+        // The Gradient being dragged, painted over the (premultiplied) document in Normal mode.
+        let g = sphere_gradient(seen);
+        col = vec4(g.rgb * g.a + col.rgb * (1.0 - g.a), g.a + col.a * (1.0 - g.a));
+    }
     col = shade(col);
     if (col.a <= 0.0) { discard; }
     return col;

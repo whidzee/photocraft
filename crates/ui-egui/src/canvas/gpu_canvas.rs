@@ -95,8 +95,8 @@ const FORMAT_HIGH: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 /// documents (a 14000² one would need 2.1 GB) use `Rgba8Unorm`, so they stay on the GPU like
 /// 8-bit ones. `PHOTOCRAFT_CANVAS_F16=0` turns the float canvas off, `=1` ignores this budget.
 pub const F16_BUDGET_PX: u64 = 100_000_000;
-const VIEW_UNIFORM_SIZE: u64 = 128;
-const VIEW_FLOATS: usize = 32;
+const VIEW_UNIFORM_SIZE: u64 = 1216;
+const VIEW_FLOATS: usize = 304;
 const TILE_UNIFORM_SIZE: u64 = 32;
 
 /// Whether this view can use the GPU canvas. Flip and non-square pixel aspect correction are
@@ -137,6 +137,21 @@ pub struct ViewParams {
     /// With `projection`: each view direction shows the content of this rotation of it (a unit quaternion `x, y, z,
     /// w`), for Image › Rotate Panorama's preview. `None` shows the document as it is.
     pub sphere_turn: Option<[f32; 4]>,
+    /// With `projection`: the Gradient being dragged in the view, drawn over the document (`view360`).
+    pub sphere_gradient: Option<SphereGradient>,
+}
+
+/// How many colours a [`SphereGradient`] carries.
+pub const SPHERE_GRADIENT_COLORS: usize = 64;
+
+/// The 360° View's Gradient as the sphere shader draws it while it is dragged: the axes it is measured by on the
+/// sphere, its shape, and its straight RGBA colours sampled evenly from start to end, opacity in their alpha
+/// (`photocraft_engine::projected_fill::GradientLook`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SphereGradient {
+    pub axes: [[f32; 4]; 3],
+    pub shape: u32,
+    pub colors: [[f32; 4]; SPHERE_GRADIENT_COLORS],
 }
 
 /// When high-bit documents get an `Rgba16Float` canvas texture.
@@ -1119,6 +1134,9 @@ mod mip_gpu_tests;
 
 #[cfg(test)]
 mod sharp_gpu_tests;
+
+#[cfg(test)]
+mod sphere_gradient_gpu_tests;
 
 #[cfg(test)]
 mod tests;

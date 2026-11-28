@@ -216,7 +216,7 @@ pub(crate) struct Shown {
 
 /// The document's picture as prepared for this pass, before the app is borrowed shared.
 enum Prepared {
-    Gpu(GpuPicture),
+    Gpu(Box<GpuPicture>),
     Cpu(CompositePrep),
 }
 
@@ -377,7 +377,7 @@ pub(crate) fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui, view: &mut View, 
             }
         }
         let prepared = match picture {
-            Some(picture) => Some(Prepared::Gpu(picture)),
+            Some(picture) => Some(Prepared::Gpu(Box::new(picture))),
             None => CompositePrep::new(app, ctx, idx, output, live.as_ref()).map(Prepared::Cpu),
         };
         // The grid reads the committed composite; with the GPU picture on there is no CPU one yet.
@@ -400,7 +400,7 @@ pub(crate) fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui, view: &mut View, 
         });
         let app: &PhotocraftApp = app;
         let (gpu, composite) = match prepared {
-            Some(Prepared::Gpu(picture)) => (Some(picture), None),
+            Some(Prepared::Gpu(picture)) => (Some(*picture), None),
             Some(Prepared::Cpu(prep)) => (None, Some(prep.source(app))),
             None => (None, None),
         };

@@ -2,15 +2,15 @@
 //! with the document's picture in its preview box.
 
 use craft::behavior::kurbo::Size;
-use craft::theme::variant::Tone;
 use craft::behavior::{CanvasView, EditEvents};
+use craft::theme::variant::Tone;
 use craft::ui::canvas::{AppPaint, NavigationOptions, Navigator, NavigatorPreview, NavigatorZoomRow};
 use craft::ui::contract::{Bind, Props as _, Show as _, ShowContainer as _, Sizing};
 use craft::ui::layout_components::{Row, Stack};
-use craft::ui::text::InvalidZoom;
 use craft::ui::notices::{Notice, NoticeLayout};
 use craft::ui::patterns::canvas::NavigatorPanel;
 use craft::ui::primitives::ContentPainterCx;
+use craft::ui::text::InvalidZoom;
 use egui::{Pos2, Rect, pos2};
 
 use super::PhotocraftApp;
@@ -39,7 +39,8 @@ pub(super) fn navigator(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         if button {
             with_button(ui, &mut view, document, navigation, NavigatorPreview::Paint(paint))
         } else {
-            let out = NavigatorPanel::new(tl!("Navigator"), Bind::bound(&mut view), document).navigation(navigation).preview(NavigatorPreview::Paint(paint)).show(ui);
+            let out =
+                NavigatorPanel::new(tl!("Navigator"), Bind::bound(&mut view), document).navigation(navigation).preview(NavigatorPreview::Paint(paint)).show(ui);
             (out.view, out.invalid_zoom)
         }
     };
@@ -76,7 +77,8 @@ fn with_button(
     let mut view = Bind::bound(view);
     Stack::new().fill().show(ui, |ui, _| {
         // The body runs for the measuring pass and again for the real one, so each run lends the picture.
-        let shown = Navigator::new(tl!("Navigator"), view.reborrowed(), document).preview(preview.reborrowed()).navigation(navigation).sizing(Sizing::Fill).show(ui);
+        let shown =
+            Navigator::new(tl!("Navigator"), view.reborrowed(), document).preview(preview.reborrowed()).navigation(navigation).sizing(Sizing::Fill).show(ui);
         let row = Row::new().show(ui, |ui, _| {
             let row = NavigatorZoomRow::new(view.reborrowed(), document).show(ui);
             // The flat Navigator: 360° View is off.

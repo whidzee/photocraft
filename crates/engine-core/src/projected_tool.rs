@@ -19,7 +19,7 @@ use photocraft_geom::Rect;
 use photocraft_raster::Surface;
 use serde_json::{Value, json};
 
-use crate::brush_cmds::projected::{PreviewOverlay, overlay, to_view, write_back};
+use crate::brush_cmds::projected::{PreviewOverlay, overlay, resample, write_back};
 use crate::equirect::{Camera, ViewProjection, rot_from_slice};
 use crate::{EngineError, Result, Session};
 
@@ -54,10 +54,111 @@ fn label_of(cmd: &str) -> Option<&'static str> {
     })
 }
 
+/// The tools whose every change stays near the stroke's points: their view copy is resampled a block at a time as
+/// the stroke reaches it. The rest (the Patch, Spot Healing, Remove and fill tools, which look further) resample the
+/// whole view the first time they run.
+fn local(cmd: &str) -> bool {
+    matches!(
+        cmd,
+        "paint.healingBrush"
+            | "paint.pencil"
+            | "paint.mixerBrush"
+            | "paint.colorReplacement"
+            | "paint.historyBrush"
+            | "paint.patternStamp"
+            | "paint.backgroundEraser"
+            | "paint.blur"
+            | "paint.sharpen"
+            | "paint.smudge"
+            | "paint.dodge"
+            | "paint.burn"
+            | "paint.sponge"
+    )
+}
+
+/// What the view copy is resampled from: the document, its layers' parts the tool reads, and the projections of
+/// the view and (Healing, History Brush) of its source half.
+struct Resampler {
+    doc: Arc<Document>,
+    /// The layers resampled: the target, or every layer when the tool samples all of them.
+    layers: Vec<LayerId>,
+    target: Option<LayerId>,
+    history: Option<Surface>,
+    proj: ViewProjection,
+    src_proj: Option<ViewProjection>,
+    size: (i32, i32),
+    blocks: crate::brush_cmds::projected::Blocks,
+}
+
+/// Real HDR latlongs carry `inf` (the sun) and `NaN` pixels: the healing solves and patch searches spread one of
+/// them over the whole fill (written back as black). The view copy holds finite values; write-back only adds
+/// finite deltas, so those pixels stay as they were.
+fn finite(mut data: Vec<f32>) -> Vec<f32> {
+    for v in &mut data {
+        if !v.is_finite() {
+            *v = if v.is_nan() { 0.0 } else { v.signum() * 65504.0 };
+        }
+    }
+    data
+}
+
+impl Resampler {
+    /// Resamples the blocks of `r` not yet resampled into `doc`, the view copy: each layer's pixels and mask, the
+    /// source half beside them, and the selection.
+    fn ensure(&mut self, doc: &mut Document, r: Rect) {
+        use rayon::prelude::*;
+        let blocks = self.blocks.take(r);
+        if blocks.is_empty() {
+            return;
+        }
+        let (iw, ih) = self.size;
+        let width = self.blocks_width();
+        let fill = |src: &Surface, out: &mut Surface, src_from: Option<&Surface>, proj: &ViewProjection, src_proj: Option<&ViewProjection>| {
+            let done: Vec<(Rect, Vec<f32>, Option<Vec<f32>>)> = blocks
+                .par_iter()
+                .map(|b| {
+                    let main = finite(resample(src, proj, *b, iw, ih));
+                    let half = src_proj.map(|sp| finite(resample(src_from.unwrap_or(src), sp, *b, iw, ih)));
+                    (*b, main, half)
+                })
+                .collect();
+            for (b, main, half) in done {
+                out.write_region(b, &main);
+                if let Some(h) = half {
+                    out.write_region(Rect::new(b.x0 + width, b.y0, b.x1 + width, b.y1), &h);
+                }
+            }
+        };
+        for &id in &self.layers {
+            let Some(l) = self.doc.layer(id) else { continue };
+            let history = self.history.as_ref().filter(|_| Some(id) == self.target);
+            if let (Some(src), Some(out)) = (l.surface(), doc.layer_mut(id).and_then(|l| l.surface_mut())) {
+                fill(src, out, history, &self.proj, self.src_proj.as_ref());
+            }
+            if let (Some(m), Some(out)) = (l.mask.as_ref(), doc.layer_mut(id).and_then(|l| l.mask.as_mut())) {
+                fill(&m.surface, &mut out.surface, None, &self.proj, self.src_proj.as_ref());
+            }
+        }
+        if let (Some(m), Some(out)) = (self.doc.selection.as_ref(), doc.selection.as_mut()) {
+            fill(m, out, None, &self.proj, None);
+        }
+    }
+
+    /// Where the source half starts: the view's width.
+    fn blocks_width(&self) -> i32 {
+        self.proj.w as i32
+    }
+}
+
 /// A flat tool ready to run on the view: see the module docs.
 pub struct ProjectedTool {
     temp: Session,
     base: Arc<Document>,
+    resampler: Resampler,
+    /// The tool's changes stay near its points ([`local`]): resampled and compared only there.
+    local: bool,
+    /// How far from its points a stroke can change pixels: the brush size and a margin.
+    reach: f64,
     pre: Surface,
     proj: ViewProjection,
     view: Rect,
@@ -99,51 +200,40 @@ impl ProjectedTool {
         let history = cmd == "paint.historyBrush";
         let src_proj = if history { Some(proj) } else { rotation.map(|r| proj.rotated(&r)) };
         let history_src = if history { Some(crate::retouch_cmds::history_source(s, layer, &params, &cmd)?) } else { None };
-        let source_half = Rect::new(view.x1, 0, 2 * view.x1, view.y1);
-        // Real HDR latlongs carry `inf` (the sun) and `NaN` pixels: the healing solves and patch
-        // searches spread one of them over the whole fill (written back as black). The view copy
-        // holds finite values; write-back only adds finite deltas, so those pixels stay as they were.
-        let finite = |mut s: Surface| -> Surface {
-            let mut b = s.read_region(view);
-            if b.iter().all(|v| v.is_finite()) {
-                return s;
-            }
-            for v in &mut b {
-                if !v.is_finite() {
-                    *v = if v.is_nan() { 0.0 } else { v.signum() * 65504.0 };
-                }
-            }
-            s.write_region(view, &b);
-            s
-        };
-        let resample = |surf: &Surface, src: Option<&Surface>| -> Surface {
-            let mut out = finite(to_view(surf, &proj, view, iw, ih));
-            if let Some(sp) = &src_proj {
-                let r = finite(to_view(src.unwrap_or(surf), sp, view, iw, ih));
-                out.write_region(source_half, &r.read_region(view));
-            }
-            out
-        };
         let all = params.get("sampleAllLayers").and_then(Value::as_bool).unwrap_or(false)
             || params.get("sampleLayer").and_then(Value::as_str).is_some_and(|v| v != "current");
+        // The view copy starts empty: [`Resampler::ensure`] fills it where the tool needs it.
         let mut doc = (*st.doc).clone();
         let ids: Vec<LayerId> = doc.walk().iter().map(|(_, _, l)| l.id).collect();
+        let mut kept = Vec::new();
         for id in ids {
-            let keep = Some(id) == layer || all;
+            if Some(id) == layer || all {
+                kept.push(id);
+            }
             let Some(l) = doc.layer_mut(id) else { continue };
-            let target = Some(id) == layer;
             if let Some(sf) = l.surface_mut() {
-                *sf = if keep { resample(sf, history_src.as_ref().filter(|_| target)) } else { Surface::new(sf.format()) };
+                *sf = Surface::new(sf.format());
             }
             if let Some(m) = l.mask.as_mut() {
-                m.surface = if keep { resample(&m.surface, None) } else { Surface::new(m.surface.format()) };
+                m.surface = Surface::new(m.surface.format());
             }
         }
-        doc.selection = doc.selection.take().map(|m| to_view(&m, &proj, view, iw, ih));
+        doc.selection = doc.selection.take().map(|m| Surface::new(m.format()));
         for c in &mut doc.channels {
             c.surface = Surface::new(c.surface.format());
         }
         let width = if src_proj.is_some() { 2 * view.x1 } else { view.x1 };
+        let resampler = Resampler {
+            doc: Arc::clone(&st.doc),
+            layers: kept,
+            target: layer,
+            history: history_src,
+            proj,
+            src_proj,
+            size: (iw, ih),
+            blocks: crate::brush_cmds::projected::Blocks::new(view),
+        };
+        let local = local(&cmd);
         doc.size.width = width as u32;
         doc.size.height = view.y1 as u32;
         let mut temp = Session::new();
@@ -167,12 +257,24 @@ impl ProjectedTool {
         }
         let base = temp.active().ok_or(EngineError::NoDocument)?.doc.clone();
         let pre = crate::channel_cmds::read_target_surface(&base, layer, &params)?.clone();
-        Ok(Self { temp, base, pre, proj, view, layer, cmd, params, label, offset })
+        let size = params.get("size").and_then(Value::as_f64).unwrap_or(f64::from(s.tools.brush.size));
+        Ok(Self { temp, base, resampler, local, reach: size * 1.5 + 16.0, pre, proj, view, layer, cmd, params, label, offset })
     }
 
     /// Run the tool on `points` (view px, `[x, y, pressure]`) from the resampled state: the
     /// target as it then is, and the view rect it changed.
     fn run(&mut self, points: &[[f64; 3]]) -> Result<(Surface, Rect)> {
+        // Where the stroke can change pixels (the whole view, for a tool that looks further): only there is the view
+        // resampled and compared.
+        let area = if self.local { self.area(points) } else { self.view };
+        // The view copy is filled when the tool first runs, not on the press: a Gradient the screen draws itself never
+        // needs one.
+        if self.resampler.blocks.missing(area) {
+            let mut doc = (*self.base).clone();
+            self.resampler.ensure(&mut doc, area);
+            self.base = Arc::new(doc);
+            self.pre = crate::channel_cmds::read_target_surface(&self.base, self.layer, &self.params)?.clone();
+        }
         if let Some(d) = self.temp.active_mut() {
             *d.doc_mut() = self.base.clone();
         }
@@ -186,7 +288,7 @@ impl ProjectedTool {
                 crate::projected_fill::gradient_view(&mut self.temp, &p, &self.proj, [a[0], a[1]], [b[0], b[1]])?;
                 let doc = self.temp.active().ok_or(EngineError::NoDocument)?.doc.clone();
                 let post = crate::channel_cmds::read_target_surface(&doc, self.layer, &p)?.clone();
-                let damage = diff_bounds(&self.pre, &post, self.view);
+                let damage = diff_bounds(&self.pre, &post, area);
                 return Ok((post, damage));
             }
             _ => p["points"] = json!(points),
@@ -201,8 +303,25 @@ impl ProjectedTool {
         self.temp.execute(cmd, p.clone())?;
         let doc = self.temp.active().ok_or(EngineError::NoDocument)?.doc.clone();
         let post = crate::channel_cmds::read_target_surface(&doc, self.layer, &p)?.clone();
-        let damage = diff_bounds(&self.pre, &post, self.view);
+        let damage = diff_bounds(&self.pre, &post, area);
         Ok((post, damage))
+    }
+
+    /// The view rect `points` can change, out to the blocks it falls in: the points' bounds grown by the brush's
+    /// reach.
+    fn area(&self, points: &[[f64; 3]]) -> Rect {
+        let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+        for q in points {
+            (x0, y0, x1, y1) = (x0.min(q[0]), y0.min(q[1]), x1.max(q[0]), y1.max(q[1]));
+        }
+        if x0 > x1 {
+            return Rect::EMPTY;
+        }
+        let e = self.reach;
+        let r = Rect::new((x0 - e).floor() as i32, (y0 - e).floor() as i32, (x1 + e).ceil() as i32, (y1 + e).ceil() as i32);
+        let b = crate::brush_cmds::projected::BLOCK;
+        let down = |v: i32| v.div_euclid(b) * b;
+        Rect::new(down(r.x0), down(r.y0), down(r.x1 - 1) + b, down(r.y1 - 1) + b).intersect(&self.view)
     }
 
     /// One live preview frame: what the stroke so far changes, as an overlay.

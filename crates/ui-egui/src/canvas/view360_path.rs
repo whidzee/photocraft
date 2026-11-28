@@ -277,9 +277,8 @@ fn edit(app: &mut PhotocraftApp, ctx: &egui::Context, response: &egui::Response,
     let (iw, ih) = (f64::from(st.doc.size.width), f64::from(st.doc.size.height));
     let Some(path) = st.doc.work_path.clone() else { return };
     let knots = view_knots(app, vp);
-    let near_anchor = |q: [f64; 2]| {
-        knots.iter().filter_map(|(s, k, a, ..)| a.map(|a| (dist(a, q), *s, *k))).filter(|(d, ..)| *d <= tol).min_by(|a, b| a.0.total_cmp(&b.0))
-    };
+    let near_anchor =
+        |q: [f64; 2]| knots.iter().filter_map(|(s, k, a, ..)| a.map(|a| (dist(a, q), *s, *k))).filter(|(d, ..)| *d <= tol).min_by(|a, b| a.0.total_cmp(&b.0));
     let near_handle = |q: [f64; 2]| {
         knots
             .iter()

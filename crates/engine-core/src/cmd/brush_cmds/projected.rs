@@ -71,8 +71,8 @@ fn sample_buf(buf: &[f32], r: Rect, n: usize, x: f64, y: f64, out: &mut [f32]) {
     }
 }
 
-/// Resample the equirect target into view space over `r`.
-pub(crate) fn to_view(target: &Surface, proj: &ViewProjection, r: Rect, iw: i32, ih: i32) -> Surface {
+/// The equirect `target` resampled into view space over `r`, row-major.
+pub(crate) fn resample(target: &Surface, proj: &ViewProjection, r: Rect, iw: i32, ih: i32) -> Vec<f32> {
     use rayon::prelude::*;
     let n = target.channels();
     let row = r.width() as usize * n;
@@ -88,9 +88,111 @@ pub(crate) fn to_view(target: &Surface, proj: &ViewProjection, r: Rect, iw: i32,
             }
         });
     }
+    data
+}
+
+/// Resample the equirect target into view space over `r`.
+pub(crate) fn to_view(target: &Surface, proj: &ViewProjection, r: Rect, iw: i32, ih: i32) -> Surface {
     let mut s = Surface::new(target.format());
-    s.write_region(r, &data);
+    s.write_region(r, &resample(target, proj, r, iw, ih));
     s
+}
+
+/// The side of the square blocks a [`LazyView`] resamples at a time: the brush engine's coverage tile, so a dab's
+/// tiles are whole blocks.
+pub(crate) const BLOCK: i32 = photocraft_paint::render::COV_TILE;
+
+/// Which `BLOCK`-square blocks of a view have been resampled.
+#[derive(Clone)]
+pub(crate) struct Blocks {
+    view: Rect,
+    columns: i32,
+    done: Vec<bool>,
+}
+
+impl Blocks {
+    pub(crate) fn new(view: Rect) -> Self {
+        let columns = (view.x1 - view.x0 + BLOCK - 1).max(0) / BLOCK;
+        let rows = (view.y1 - view.y0 + BLOCK - 1).max(0) / BLOCK;
+        Self { view, columns, done: vec![false; (columns * rows).max(0) as usize] }
+    }
+
+    /// The column and row of each block `r` touches.
+    fn of(&self, r: Rect) -> impl Iterator<Item = (i32, i32)> + use<> {
+        let r = r.intersect(&self.view);
+        let (bx0, by0) = ((r.x0 - self.view.x0) / BLOCK, (r.y0 - self.view.y0) / BLOCK);
+        let (bx1, by1) = ((r.x1 - self.view.x0 + BLOCK - 1) / BLOCK, (r.y1 - self.view.y0 + BLOCK - 1) / BLOCK);
+        let (bx1, by1) = if r.is_empty() { (bx0, by0) } else { (bx1, by1) };
+        (by0..by1).flat_map(move |by| (bx0..bx1).map(move |bx| (bx, by)))
+    }
+
+    /// Whether some block of `r` hasn't been resampled.
+    pub(crate) fn missing(&self, r: Rect) -> bool {
+        self.of(r).any(|(bx, by)| !self.done[(by * self.columns + bx) as usize])
+    }
+
+    /// The blocks of `r` not yet resampled, marked as resampled now.
+    pub(crate) fn take(&mut self, r: Rect) -> Vec<Rect> {
+        let mut out = Vec::new();
+        for (bx, by) in self.of(r) {
+            let i = (by * self.columns + bx) as usize;
+            if !self.done[i] {
+                self.done[i] = true;
+                let (x, y) = (self.view.x0 + bx * BLOCK, self.view.y0 + by * BLOCK);
+                out.push(Rect::new(x, y, x + BLOCK, y + BLOCK).intersect(&self.view));
+            }
+        }
+        out
+    }
+}
+
+/// An equirect surface resampled into a view a block at a time, as a stroke reaches each block (View › 360° View).
+/// A press costs nothing up front, however large the latlong; a stroke pays only for the blocks it covers.
+pub(crate) struct LazyView {
+    src: Surface,
+    proj: ViewProjection,
+    size: (i32, i32),
+    blocks: Blocks,
+    /// The view so far: resampled where [`ensure`](Self::ensure) has been asked for.
+    pub(crate) out: Surface,
+}
+
+impl LazyView {
+    pub(crate) fn new(src: &Surface, proj: &ViewProjection, view: Rect, size: (i32, i32)) -> Self {
+        Self { src: src.clone(), proj: *proj, size, blocks: Blocks::new(view), out: Surface::new(src.format()) }
+    }
+
+    /// An already resampled view: nothing left to fill.
+    pub(crate) fn whole(out: Surface, proj: &ViewProjection, view: Rect, size: (i32, i32)) -> Self {
+        let mut blocks = Blocks::new(view);
+        blocks.take(view);
+        Self { src: Surface::new(out.format()), proj: *proj, size, blocks, out }
+    }
+
+    /// Resamples the blocks of `r` not yet resampled, and hands back each with its pixels.
+    pub(crate) fn ensure(&mut self, r: Rect) -> Vec<(Rect, Vec<f32>)> {
+        use rayon::prelude::*;
+        let missing = self.blocks.take(r);
+        let (src, proj, (iw, ih)) = (&self.src, &self.proj, self.size);
+        let filled: Vec<(Rect, Vec<f32>)> = missing.into_par_iter().map(|b| (b, resample(src, proj, b, iw, ih))).collect();
+        for (b, data) in &filled {
+            self.out.write_region(*b, data);
+        }
+        filled
+    }
+}
+
+/// Each of `dabs`' rects, out to the brush engine's coverage tiles it touches.
+pub(crate) fn dab_tiles(dabs: &[photocraft_paint::Dab]) -> Vec<Rect> {
+    let down = |v: i32| v.div_euclid(BLOCK) * BLOCK;
+    dabs.iter()
+        .map(|d| {
+            let e = f64::from(d.radius) * 1.5 + 2.0;
+            let (x0, y0) = ((d.center.x - e).floor() as i32, (d.center.y - e).floor() as i32);
+            let (x1, y1) = ((d.center.x + e).ceil() as i32, (d.center.y + e).ceil() as i32);
+            Rect::new(down(x0), down(y0), down(x1 - 1) + BLOCK, down(y1 - 1) + BLOCK)
+        })
+        .collect()
 }
 
 /// Write `post − pre` (view space, over `damage`) back into the equirect `target` of `size`
@@ -201,30 +303,51 @@ pub(crate) fn write_back(
 
 /// What a live projected stroke paints with.
 pub(crate) enum PreviewKind {
+    /// The Brush and Eraser: the brush engine, fed each update's new points.
     Brush {
         brush: Box<photocraft_paint::BrushSettings>,
         lock: bool,
+        /// The stroke so far, and how many of its points it has had.
+        live: Option<(Box<photocraft_paint::StrokeRenderer>, usize)>,
     },
     /// The Clone Stamp: the rotated source in view space, painted through the stroke coverage.
-    Clone {
-        source: Surface,
-        brush: Box<photocraft_paint::BrushSettings>,
-        mode: photocraft_color::BlendMode,
-        lock: bool,
-    },
+    Clone { source: Box<LazyView>, brush: Box<photocraft_paint::BrushSettings>, mode: photocraft_color::BlendMode, lock: bool },
 }
 
-/// A projected stroke shown while it is drawn (View › 360° View): the
-/// target resampled into the whole view once, then every update renders the stroke so far with
-/// the real brush engine (or the Clone Stamp's coverage and source) on a copy, and hands back an
-/// RGBA8 overlay of what changed. Only view-sized buffers are touched, whatever the document
-/// size; the commit (`paint.projectedStroke` / `paint.projectedClone`) reprojects on release.
+/// A projected stroke shown while it is drawn (View › 360° View). The target is resampled into the view a block at
+/// a time as the stroke reaches it ([`LazyView`]), so a press costs nothing up front. The Brush and Eraser feed each
+/// update's new points to one brush engine stroke and draw only the tiles they touch, so an update costs what its
+/// new dabs cost, however long the stroke; the Clone Stamp renders the stroke so far each update. Each update hands
+/// back an RGBA8 overlay of what changed in it. The commit (`paint.projectedStroke` / `paint.projectedClone`)
+/// reprojects on release.
 pub struct ProjectedPreview {
-    pre: Surface,
+    pre: LazyView,
+    /// The view as the stroke leaves it: the resampled blocks, painted.
+    post: Surface,
     view: Rect,
     /// The active selection resampled into the view: strokes are clipped by it.
-    sel: Option<Surface>,
+    sel: Option<LazyView>,
+    /// Where the last update showed the stroke's unfinished end.
+    tail: Rect,
     pub(crate) kind: PreviewKind,
+}
+
+/// Where `shown` (the stroke with its unfinished end) differs from `post` (without it), inside `r`.
+fn shown_tail(shown: &Surface, post: &Surface, r: Rect) -> Rect {
+    if r.is_empty() {
+        return Rect::EMPTY;
+    }
+    let (a, b) = (shown.read_region(r), post.read_region(r));
+    let n = shown.channels().max(1);
+    let w = r.width() as usize;
+    let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+    for (i, (p, q)) in a.chunks_exact(n).zip(b.chunks_exact(n)).enumerate() {
+        if p != q {
+            let (x, y) = (r.x0 + (i % w) as i32, r.y0 + (i / w) as i32);
+            (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x + 1), y1.max(y + 1));
+        }
+    }
+    if x0 > x1 { Rect::EMPTY } else { Rect::new(x0, y0, x1, y1) }
 }
 
 /// One preview frame: `px` (unmultiplied sRGB RGBA8, row-major) covers view pixels `rect`.
@@ -242,45 +365,102 @@ impl ProjectedPreview {
         let (id, mut brush, _) = stroke_target(s, p, brush)?;
         let st = s.active().ok_or(EngineError::NoDocument)?;
         let mut doc = (*st.doc).clone();
-        let (iw, ih) = (doc.size.width as i32, doc.size.height as i32);
+        let size = (doc.size.width as i32, doc.size.height as i32);
         let view = Rect::new(0, 0, proj.w as i32, proj.h as i32);
-        let sel = doc.selection.clone().map(|m| to_view(&m, &proj, view, iw, ih));
+        let sel = doc.selection.clone().map(|m| LazyView::new(&m, &proj, view, size));
         let (surf, lock) = crate::channel_cmds::target_surface(&mut doc, id, p)?;
         erase_locked(&mut brush, lock, bg);
-        Ok(Self { pre: to_view(surf, &proj, view, iw, ih), view, sel, kind: PreviewKind::Brush { brush: Box::new(brush), lock } })
+        let pre = LazyView::new(surf, &proj, view, size);
+        Ok(Self::with(pre, view, sel, PreviewKind::Brush { brush: Box::new(brush), lock, live: None }))
     }
 
-    pub(crate) fn with(pre: Surface, view: Rect, sel: Option<Surface>, kind: PreviewKind) -> Self {
-        Self { pre, view, sel, kind }
+    pub(crate) fn with(pre: LazyView, view: Rect, sel: Option<LazyView>, kind: PreviewKind) -> Self {
+        let post = pre.out.clone();
+        Self { pre, post, view, sel, tail: Rect::EMPTY, kind }
     }
 
-    /// Render `points` (view pixels, `[x, y, pressure]`). `None` when nothing shows yet or the
-    /// target isn't RGB/gray.
-    pub fn render(&self, points: &[[f64; 3]]) -> Option<PreviewOverlay> {
+    /// Resamples the blocks of `r` the stroke hasn't reached yet, into the view before and after it.
+    fn ensure(&mut self, r: Rect) {
+        for (b, data) in self.pre.ensure(r) {
+            self.post.write_region(b, &data);
+        }
+        if let Some(m) = self.sel.as_mut() {
+            m.ensure(r);
+        }
+    }
+
+    /// Render the stroke so far, `points` (view pixels, `[x, y, pressure]`), and return what changed since the last
+    /// update. `None` when nothing new shows or the target isn't RGB/gray.
+    pub fn render(&mut self, points: &[[f64; 3]]) -> Option<PreviewOverlay> {
         let pts: Vec<photocraft_paint::StrokePoint> = points.iter().map(|q| photocraft_paint::StrokePoint::new(q[0], q[1], q[2] as f32)).collect();
         if pts.is_empty() {
             return None;
         }
-        let mut post = self.pre.clone();
-        let damage = match &self.kind {
-            PreviewKind::Brush { brush, lock } => photocraft_paint::render_stroke(&mut post, brush, &pts, self.sel.as_ref(), *lock, 1.0),
-            PreviewKind::Clone { source, brush, mode, lock } => {
+        let damage = match &mut self.kind {
+            PreviewKind::Brush { brush, lock, live } => {
+                // A shorter stroke than the one so far starts again.
+                if live.as_ref().is_some_and(|(_, n)| *n > pts.len()) {
+                    *live = None;
+                    self.post = self.pre.out.clone();
+                }
+                let fmt = self.pre.out.format();
+                let (r, n) = live.get_or_insert_with(|| (Box::new(photocraft_paint::StrokeRenderer::new(brush, Some(fmt), 1.0).record_dabs()), 0));
+                let before = r.dab_count();
+                r.push(&pts[*n..]);
+                *n = pts.len();
+                // Only the blocks the new dabs (and the stroke's unfinished end) reach are resampled, and only their
+                // tiles drawn.
+                let tail = r.tail_preview();
+                let mut reach = dab_tiles(&r.dabs()[before..]);
+                if tail.is_some() {
+                    reach.extend(dab_tiles(&r.tail_dabs()));
+                }
+                for q in reach {
+                    for (b, data) in self.pre.ensure(q) {
+                        self.post.write_region(b, &data);
+                    }
+                    if let Some(m) = self.sel.as_mut() {
+                        m.ensure(q);
+                    }
+                }
+                let sel = self.sel.as_ref().map(|m| &m.out);
+                let mut damage = r.composite(&self.pre.out, &mut self.post, sel, *lock, false);
+                // What finishing the stroke now would add (a lone first dab, the smoothing catch-up) shows on a copy,
+                // and the next update redraws where it showed.
+                let mut shown = self.post.clone();
+                for q in [std::mem::take(&mut self.tail), tail.map_or(Rect::EMPTY, |mut t| t.composite(&self.pre.out, &mut shown, sel, *lock, true))] {
+                    if !q.is_empty() {
+                        damage = if damage.is_empty() { q } else { damage.union(&q) };
+                    }
+                }
+                self.tail = shown_tail(&shown, &self.post, damage);
+                let damage = damage.intersect(&self.view);
+                return if damage.is_empty() { None } else { overlay(&self.pre.out, &shown, damage) };
+            }
+            PreviewKind::Clone { brush, .. } => {
                 let stroke = photocraft_paint::Stroke { brush: (**brush).clone(), points: pts };
                 let (bounds, cov) = photocraft_paint::retouch::stroke_coverage(&stroke);
                 let work = bounds.intersect(&self.view);
                 if work.is_empty() {
                     return None;
                 }
+                self.ensure(work);
+                let PreviewKind::Clone { source, brush, mode, lock } = &mut self.kind else { return None };
+                source.ensure(work);
                 let cov = crop_cov(&cov, bounds, work);
-                let paint = photocraft_paint::retouch::Region::read(source, work);
-                photocraft_paint::retouch::apply_coverage(&mut post, work, &cov, brush.opacity, self.sel.as_ref(), *lock, &paint, *mode)
+                let paint = photocraft_paint::retouch::Region::read(&source.out, work);
+                let mut post = self.pre.out.clone();
+                let d =
+                    photocraft_paint::retouch::apply_coverage(&mut post, work, &cov, brush.opacity, self.sel.as_ref().map(|m| &m.out), *lock, &paint, *mode);
+                self.post = post;
+                d
             }
         }
         .intersect(&self.view);
         if damage.is_empty() {
             return None;
         }
-        overlay(&self.pre, &post, damage)
+        overlay(&self.pre.out, &self.post, damage)
     }
 }
 
@@ -415,7 +595,7 @@ mod tests {
             "size": 30, "hardness": 0.0, "color": "#ff0000",
             "projection": {"yaw": 0.0, "pitch": 0.0, "fov": 90.0, "width": 400, "height": 300}
         });
-        let live = ProjectedPreview::brush(&s, &p).unwrap();
+        let mut live = ProjectedPreview::brush(&s, &p).unwrap();
         let o = live.render(&[[200.0, 150.0, 1.0]]).expect("a dab shows");
         let at = |x: i32, y: i32| o.px[((y - o.rect.y0) * o.rect.width() as i32 + (x - o.rect.x0)) as usize];
         let c = at(200, 150);
@@ -425,6 +605,38 @@ mod tests {
         assert_eq!(at(o.rect.x0, o.rect.y0)[3], 0, "not a square stamp");
         // Nothing was written to the document.
         assert_eq!(rgba(&s, 360, 180)[3], 0.0);
+    }
+
+    /// A stroke previewed a few points at a time ends as the same picture as the whole stroke previewed at once,
+    /// and each update hands back only the part of the view its new points reach.
+    #[test]
+    fn a_stroke_previewed_in_parts_matches_the_whole_stroke() {
+        let mut s = crate::session();
+        s.execute("file.new", json!({"width": 1440, "height": 720, "background": "white"})).unwrap();
+        s.execute("paint.gradient", json!({"from": [0, 0], "to": [1440, 720]})).unwrap();
+        let p = json!({
+            "size": 24, "hardness": 0.5, "opacity": 60, "color": "#3050a0",
+            "projection": {"yaw": 30.0, "pitch": 20.0, "fov": 80.0, "width": 640, "height": 400}
+        });
+        let points: Vec<[f64; 3]> = (0..120).map(|i| [80.0 + 4.0 * f64::from(i), 200.0 + 60.0 * (f64::from(i) / 12.0).sin(), 1.0]).collect();
+        let mut parts = ProjectedPreview::brush(&s, &p).unwrap();
+        let mut last = None;
+        for n in (10..=points.len()).step_by(10) {
+            last = parts.render(&points[..n]);
+        }
+        let mut whole = ProjectedPreview::brush(&s, &p).unwrap();
+        let all = whole.render(&points).expect("the stroke shows");
+        let last = last.expect("the last part shows");
+        assert!(
+            all.rect.contains_rect(&last.rect) && last.rect.width() < all.rect.width(),
+            "the last update covers only its part: {:?} in {:?}",
+            last.rect,
+            all.rect
+        );
+        // What each shows over the whole stroke: the same picture.
+        let r = all.rect;
+        let shown = |p: &ProjectedPreview| overlay(&p.pre.out, &p.post, r).map(|o| o.px);
+        assert!(shown(&parts) == shown(&whole), "the same stroke either way");
     }
 
     #[test]

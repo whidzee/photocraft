@@ -72,6 +72,23 @@ impl CanvasCallback {
     }
 
     fn uniforms(&self, screen: [u32; 2], ppp: f32, out_linear: bool, style: &CanvasStyle) -> [f32; VIEW_FLOATS] {
+        let mut out = [0.0; VIEW_FLOATS];
+        out[..32].copy_from_slice(&self.base_uniforms(screen, ppp, out_linear, style));
+        // 360° View: the Gradient being dragged (`fs_proj`'s `sphere_gradient`), when its numbers are sound.
+        if let Some(g) = self.params.sphere_gradient.filter(|g| g.axes.iter().chain(&g.colors).flatten().all(|v| v.is_finite())) {
+            for (i, a) in g.axes.iter().enumerate() {
+                out[32 + 4 * i..36 + 4 * i].copy_from_slice(a);
+            }
+            out[44] = 1.0;
+            out[45] = g.shape as f32;
+            for (i, c) in g.colors.iter().enumerate() {
+                out[48 + 4 * i..52 + 4 * i].copy_from_slice(c);
+            }
+        }
+        out
+    }
+
+    fn base_uniforms(&self, screen: [u32; 2], ppp: f32, out_linear: bool, style: &CanvasStyle) -> [f32; 32] {
         let p = &self.params;
         let (origin, scale) = self.placement(ppp);
         let (mode, lod) = filter_mode(scale);

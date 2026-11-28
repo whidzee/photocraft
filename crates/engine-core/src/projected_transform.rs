@@ -632,6 +632,29 @@ pub(crate) fn place_new_layer(
 /// rasterized there and placed upright where it was drawn in the view, as a new pixel layer named after it. A latlong
 /// can't hold an editable text or shape layer that looks right on the sphere.
 pub fn projected_render(s: &mut Session, p: &Value) -> Result<Value> {
+    let (rendered, label) = render_in_view(s, p)?;
+    let Rendered { surface, bounds: cb, name, proj } = rendered;
+    if cb.is_empty() {
+        return Err(EngineError::Other("nothing to place: the text or shape is empty".into()));
+    }
+    let (x0, y0, x1, y1) = (f64::from(cb.x0), f64::from(cb.y0), f64::from(cb.x1), f64::from(cb.y1));
+    let quad = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+    let id = place_new_layer(s, &surface, cb, quad, &proj, NewLayer { label, name: Some(name), keep_selection: true })?;
+    Ok(json!({"layer": id.0}))
+}
+
+/// What `layer.projectedRender` makes in the view before it places it: the rasterized layer, the view rect it
+/// covers, its name, and the view.
+struct Rendered {
+    surface: Surface,
+    bounds: Rect,
+    name: String,
+    proj: ViewProjection,
+}
+
+/// `layer.projectedRender`'s text or shape, rendered and rasterized on a transparent document the size of the view;
+/// with the History label the placing takes.
+fn render_in_view(s: &Session, p: &Value) -> Result<(Rendered, &'static str)> {
     const CMD: &str = "layer.projectedRender";
     let proj = projection_of(p, CMD)?;
     let cmd = p.get("command").and_then(Value::as_str).ok_or_else(|| bad(CMD, "missing `command`"))?;
@@ -658,15 +681,20 @@ pub fn projected_render(s: &mut Session, p: &Value) -> Result<Value> {
     let lid = td.active_layer.ok_or_else(|| EngineError::Other("no layer".into()))?;
     let layer = td.doc.layer(lid).ok_or(EngineError::NoLayer(lid))?;
     let name = layer.name.clone();
-    let surf = layer.surface().ok_or_else(|| EngineError::Other("nothing rendered".into()))?.clone();
-    let cb = surf.content_bounds();
-    if cb.is_empty() {
-        return Err(EngineError::Other("nothing to place: the text or shape is empty".into()));
+    let surface = layer.surface().ok_or_else(|| EngineError::Other("nothing rendered".into()))?.clone();
+    let bounds = surface.content_bounds();
+    Ok((Rendered { surface, bounds, name, proj }, label))
+}
+
+/// What `layer.projectedRender` with `p` would place, as the view shows it while the text is typed (View › 360°
+/// View's Type tool): the rendered text upright where it will go, as an overlay in view pixels. `None` when it
+/// renders nothing yet.
+pub fn projected_render_preview(s: &Session, p: &Value) -> Result<Option<crate::brush_cmds::PreviewOverlay>> {
+    let (rendered, _) = render_in_view(s, p)?;
+    if rendered.bounds.is_empty() {
+        return Ok(None);
     }
-    let (x0, y0, x1, y1) = (f64::from(cb.x0), f64::from(cb.y0), f64::from(cb.x1), f64::from(cb.y1));
-    let quad = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
-    let id = place_new_layer(s, &surf, cb, quad, &proj, NewLayer { label, name: Some(name), keep_selection: true })?;
-    Ok(json!({"layer": id.0}))
+    Ok(crate::brush_cmds::projected::overlay(&Surface::new(rendered.surface.format()), &rendered.surface, rendered.bounds))
 }
 
 /// `layer.projectedPlace` — see the module docs.

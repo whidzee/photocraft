@@ -616,14 +616,30 @@ pub(crate) struct HeldStates {
     pub(crate) states: Tracked<CommandStates>,
 }
 
-/// The tool commands: the current tool's row is checked.
+/// The tool commands: the current tool's row is checked. While the active document is in View › 360° View, the
+/// tools that don't work there yet are greyed out, saying so.
 fn build_tool_states(app: &PhotocraftApp) -> SourceStates {
-    Tool::ALL.iter().map(|&tool| (CommandRef::from(crate::panels::tool_commands::command_of(tool)), CommandState::new().checked(app.ui.tool == tool))).collect()
+    let sphere = sphere_on(app);
+    Tool::ALL
+        .iter()
+        .map(|&tool| {
+            let mut state = CommandState::new().checked(app.ui.tool == tool);
+            if sphere && !crate::canvas::view360::works(tool) {
+                state = state.enabled(false).hint(tl!("Not available in 360° View yet"));
+            }
+            (CommandRef::from(crate::panels::tool_commands::command_of(tool)), state)
+        })
+        .collect()
 }
 
-/// [`build_tool_states`], derived from the tool.
+/// Whether the active document is in View › 360° View.
+fn sphere_on(app: &PhotocraftApp) -> bool {
+    app.session.active_index().is_some_and(|i| crate::canvas::view360::is_on(app, i))
+}
+
+/// [`build_tool_states`], derived from the tool and whether the active document is in 360° View.
 fn tool_states(app: &PhotocraftApp, name: &'static str) -> Arc<SourceStates> {
-    derived_states(app, name, &(app.ui.tool as u64), || build_tool_states(app))
+    derived_states(app, name, &((app.ui.tool as u64) << 1 | u64::from(sphere_on(app))), || build_tool_states(app))
 }
 
 /// Brings the held states up to date for the coming frame. A source whose states are the `Arc` it last gave costs a

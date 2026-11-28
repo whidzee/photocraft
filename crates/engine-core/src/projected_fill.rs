@@ -87,6 +87,64 @@ impl SphereGradient {
     }
 }
 
+/// How many colours [`GradientLook::colors`] holds: the stops sampled evenly from 0 to 1.
+pub const LOOK_COLORS: usize = 64;
+
+/// The 360° View's Gradient as the screen can draw it while it is dragged, on the graphics card: the sphere axes
+/// [`SphereGradient`] measures by, and the gradient's colours sampled evenly, reversed and with the tool's opacity
+/// in their alpha. Only for a drag the card shows exactly as the release paints it ([`gradient_look`]).
+pub struct GradientLook {
+    /// The start direction and the start angle, the tangent along the gradient and its length in radians, and the
+    /// across direction and the Radial shape's length.
+    pub axes: [[f32; 4]; 3],
+    /// 0 Linear, 1 Radial, 2 Angle, 3 Reflected, 4 Diamond.
+    pub shape: u32,
+    /// Straight RGBA document colours, [`LOOK_COLORS`] of them from the gradient's start to its end.
+    pub colors: Vec<[f32; 4]>,
+}
+
+/// The 360° View Gradient dragged from view `from` to `to` (`params` as `paint.gradient` takes them, in a view of
+/// projection `vp`), when the screen can show it exactly over the composite: an 8- or 16-bit RGB or Grayscale
+/// document, with no selection, painting the active layer's pixels in Normal mode, the layer's transparency unlocked
+/// or the layer the opaque background.
+/// `None` otherwise: the view then shows the CPU preview.
+pub fn gradient_look(s: &Session, params: &Value, vp: &ViewProjection, from: [f64; 2], to: [f64; 2]) -> Option<GradientLook> {
+    use photocraft_color::{BlendMode, ColorMode, SampleType};
+    let st = s.active()?;
+    let doc = &st.doc;
+    let id = st.active_layer?;
+    let format = doc.pixel_format();
+    let plain = matches!(doc.mode, ColorMode::Rgb | ColorMode::Grayscale) && format.sample != SampleType::F32;
+    let pixels = crate::channel_cmds::target_of(params) == crate::channel_cmds::Target::Pixels;
+    // A locked layer keeps its transparency: drawn over the document the same only on the opaque background.
+    let locked = doc.effective_locks(id).transparency && !doc.is_background(id);
+    if !plain || !pixels || doc.selection.is_some() || locked || doc.layer(id)?.surface().is_none() {
+        return None;
+    }
+    let g = crate::paint_cmds::gradient_setup(s, params).ok()?;
+    if g.blend != BlendMode::Normal {
+        return None;
+    }
+    let sg = SphereGradient::new(vp, from, to, g.shape)?;
+    let f = |v: [f64; 3], w: f64| [v[0] as f32, v[1] as f32, v[2] as f32, w as f32];
+    let shape = match g.shape {
+        GradientShape::Linear => 0,
+        GradientShape::Radial => 1,
+        GradientShape::Angle => 2,
+        GradientShape::Reflected => 3,
+        GradientShape::Diamond => 4,
+    };
+    let colors = (0..LOOK_COLORS)
+        .map(|i| {
+            let t = i as f32 / (LOOK_COLORS - 1) as f32;
+            let mut c = photocraft_algo::paint::sample_stops(&g.stops, if g.reverse { 1.0 - t } else { t });
+            c[3] *= g.opacity;
+            c
+        })
+        .collect();
+    Some(GradientLook { axes: [f(sg.a, sg.th_a), f(sg.c, sg.len), f(sg.e, sg.radial_len)], shape, colors })
+}
+
 fn bad(msg: &str) -> EngineError {
     EngineError::BadParams { cmd: "paint.projectedTool".into(), msg: msg.into() }
 }

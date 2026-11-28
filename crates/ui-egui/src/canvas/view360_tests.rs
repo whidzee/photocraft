@@ -10,6 +10,10 @@ fn app(w: u32, h: u32, tool: Tool) -> Box<PhotocraftApp> {
     app.sync_views();
     app.ui.views[0].clear_pending();
     app.ui.tool = tool;
+    // The first-time look-around note would sit over the view.
+    app.session.edit_prefs(|p| {
+        p.dialogs.insert(super::LOOK_HINT.into(), json!({"skip": true}));
+    });
     command(&mut app, &json!({"on": true})).unwrap();
     app
 }
@@ -617,4 +621,18 @@ fn a_pen_path_drawn_in_the_view_selects_what_it_encloses() {
     app.run("path.toSelection", json!({})).unwrap();
     assert!(selected(&app, latlong_at(c)), "inside the path");
     assert!(!selected(&app, latlong_at(pos2(20.0, 20.0))), "not outside it");
+}
+
+/// The look-around note shows until the view is first looked around, then stays away.
+#[test]
+fn looking_around_once_puts_the_look_note_away() {
+    let mut app = app(800, 400, Tool::Brush);
+    app.session.edit_prefs(|p| {
+        p.dialogs.remove(super::LOOK_HINT);
+    });
+    let c = RECT.center();
+    drag(&mut app, &[c]);
+    assert!(!crate::dialogs::alerts::dismissed(&app, super::LOOK_HINT), "still showing after a paint click");
+    drag_with(&mut app, PointerButton::Middle, false, &[c, c + vec2(30.0, 0.0), c + vec2(60.0, 0.0)]);
+    assert!(crate::dialogs::alerts::dismissed(&app, super::LOOK_HINT), "put away by a look around");
 }

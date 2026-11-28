@@ -79,6 +79,7 @@ pub(crate) fn gpu_picture(app: &mut PhotocraftApp, req: &GpuRequest<'_>) -> Opti
         hdr,
         projection: None,
         sphere_turn: None,
+        sphere_gradient: None,
     };
     // Live adjustment previews on big documents use a downsampled proxy (see proxy.rs), unless Preferences ›
     // Performance › Low Resolution Previews is off.

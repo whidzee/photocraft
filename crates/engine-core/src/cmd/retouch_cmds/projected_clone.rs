@@ -12,7 +12,7 @@ use photocraft_raster::Surface;
 use serde_json::{Value, json};
 
 use super::{SampleLayers, bad, blend_param, composite_region, damage_json, parse_brush, run_stroke, sample_layers};
-use crate::brush_cmds::projected::{crop_cov, to_view, write_back};
+use crate::brush_cmds::projected::{LazyView, crop_cov, to_view, write_back};
 use crate::equirect::{Camera, ViewProjection, rot_from_slice, view_rect_to_equirect};
 use crate::{Result, Session};
 
@@ -99,7 +99,7 @@ pub fn projected_clone_preview(s: &Session, p: &Value) -> Result<crate::brush_cm
     let (surf, lock) = crate::channel_cmds::target_surface(&mut doc, id, p)?;
     let view = Rect::new(0, 0, w as i32, h as i32);
     let source = match which {
-        SampleLayers::Current => to_view(surf, &src_proj, view, iw, ih),
+        SampleLayers::Current => Box::new(LazyView::new(surf, &src_proj, view, (iw, ih))),
         _ => {
             let fmt = surf.format();
             let mut flat = Surface::new(fmt);
@@ -109,11 +109,11 @@ pub fn projected_clone_preview(s: &Session, p: &Value) -> Result<crate::brush_cm
                     flat.write_region(rect, &composite_region(&pre, id, which, rect, fmt).data);
                 }
             }
-            to_view(&flat, &src_proj, view, iw, ih)
+            Box::new(LazyView::whole(to_view(&flat, &src_proj, view, iw, ih), &src_proj, view, (iw, ih)))
         }
     };
-    let pre_view = to_view(surf, &proj, view, iw, ih);
-    let sel = pre.selection.as_ref().map(|m| to_view(m, &proj, view, iw, ih));
+    let pre_view = LazyView::new(surf, &proj, view, (iw, ih));
+    let sel = pre.selection.as_ref().map(|m| LazyView::new(m, &proj, view, (iw, ih)));
     Ok(ProjectedPreview::with(pre_view, view, sel, PreviewKind::Clone { source, brush: Box::new(stroke.brush), mode, lock }))
 }
 

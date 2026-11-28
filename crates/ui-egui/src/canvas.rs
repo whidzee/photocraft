@@ -181,12 +181,18 @@ pub fn canvas_view(
 ) -> (View, Option<craft::ui::canvas::CanvasOutput>) {
     let ctx = ui.ctx().clone();
     let idx = host.idx;
+    // A Navigator move from an earlier frame lands before the view is read (`view360::take_navigator_move`).
+    view360::take_navigator_move(app, &ctx);
     // The primary canvas keeps its view in `app.ui.views`: the pass starts from the stored view and stores the one it
     // ends with, unless something stored another view while the pass ran (a tool's commit that moved it), which then
     // stands; view commands asked of it meanwhile are kept for the next pass.
     // A New Window for Document keeps a view of its own (`window_views`), which is not the document's.
     let own_window = host.window.is_some_and(|window| app.ui.window_views.contains_key(&window));
     let stored = (primary && !own_window).then(|| app.ui.views.get(idx).cloned()).flatten();
+    // The camera the Navigator move just set, which the caller's copy of the view was taken before.
+    if let Some(stored) = &stored {
+        view.projection = stored.projection;
+    }
     // `View::zoom` is device pixels per document pixel; this canvas's geometry is in its own viewport's egui points. A
     // document window can sit on another display with a different scale, so only the primary canvas records `app.ppp`
     // for the frame's shared helpers (`point_zoom`, the navigator, control-channel coordinate mapping).

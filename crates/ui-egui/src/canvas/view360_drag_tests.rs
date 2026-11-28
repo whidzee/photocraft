@@ -131,8 +131,9 @@ fn a_navigator_drag_turns_the_view_steadily() {
         }
         h.event(egui::Event::PointerButton { pos: start + vec2(120.0, 0.0), button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
         h.run_steps(1);
-        // The press itself looks at the spot pressed; the drag from there is what must be steady.
-        let yaws = &yaws[1..];
+        // The press itself looks at the spot pressed, a frame later as every Navigator move lands; the drag from there
+        // is what must be steady.
+        let yaws = &yaws[2..];
         assert!(yaws.windows(2).all(|w| w[1] >= w[0] - 1e-3), "navigator first={first}: the view stepped back {yaws:?}");
         assert!(yaws.last().unwrap() - yaws[0] > 30.0, "navigator first={first}: {yaws:?}");
     }
@@ -214,4 +215,50 @@ fn the_navigator_zoom_buttons_change_the_field_of_view() {
     h.get_by_label("Zoom Out").click();
     h.run_steps(2);
     assert!(look(&h).fov > narrower);
+}
+
+/// A drag in the whole app's Navigator moves the 360° View's camera between frames, never in the middle of one: the
+/// canvas draws before or after the Navigator from frame to frame, so a camera changed mid-frame showed on the canvas
+/// a frame late only some of the time, and the view jittered.
+#[test]
+fn a_navigator_drag_moves_the_canvas_between_frames() {
+    use egui_kittest::kittest::{NodeT as _, Queryable as _};
+    let mut h = Harness::builder().with_size(vec2(1280.0, 800.0)).with_step_dt(1.0 / 60.0).with_max_steps(64).build_eframe(|cc| {
+        PhotocraftApp::setup_context(&cc.egui_ctx, Default::default());
+        let mut session = photocraft_engine::Session::new();
+        session.edit_prefs(|p| p.general.auto_show_home_screen = false);
+        let mut app = PhotocraftApp::with_context(cc.egui_ctx.clone(), session, crate::Services::default());
+        app.run("file.new", json!({"width": 2048, "height": 1024})).unwrap();
+        app.sync_views();
+        app
+    });
+    h.run_steps(6);
+    super::view360::command(h.state_mut(), &json!({"on": true})).unwrap();
+    h.run_steps(6);
+    let start = h.query_by_label_contains("Navigator, 360").expect("the Navigator's picture").rect().center();
+    h.event(egui::Event::PointerMoved(start));
+    h.run_steps(1);
+    h.event(egui::Event::PointerButton { pos: start, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    h.run_steps(1);
+    for i in 1..=12 {
+        h.event(egui::Event::PointerMoved(start + vec2(3.0 * i as f32, 0.0)));
+        h.run_steps(1);
+        let held = look(&h).readout();
+        let drawn: Vec<String> = h.query_all_by_label_contains("Yaw ").filter_map(|n| n.accesskit_node().label()).filter(|l| l.starts_with("Yaw ")).collect();
+        assert!(drawn.contains(&held), "step {i}: the canvas drew {drawn:?}, the view holds {held}");
+    }
+    assert!(look(&h).yaw > 10.0, "the drag turned the view");
+}
+
+/// In a panel taller than it needs, the 360° View Navigator's preview box grows, so its rows sit at the bottom of the
+/// panel as the flat Navigator's do, with no empty space under them.
+#[test]
+fn the_navigator_preview_fills_the_panel() {
+    use egui_kittest::kittest::Queryable as _;
+    let mut h = with_navigator(true);
+    h.run_steps(4);
+    let picture = h.query_by_label_contains("Navigator, 360").expect("the Navigator's picture").rect();
+    let last = h.query_all_by_label("Field of view").map(|n| n.rect().bottom()).fold(f32::MIN, f32::max);
+    assert!(picture.height() > picture.width() / 2.0 + 20.0, "the box grew past the image: {picture:?}");
+    assert!(last > 400.0 - 24.0 && last <= 400.0 + 1.0, "the rows end at the panel's bottom: {last}");
 }

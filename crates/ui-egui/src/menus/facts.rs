@@ -140,6 +140,8 @@ struct ShownFacts<'a> {
     /// The options, status, menu and contextual task bars.
     bars: (bool, bool, bool, bool),
     palette: bool,
+    /// View › 360° View's tick: the active document is in the 360° View.
+    view360: bool,
     theme: (&'a str, bool),
     #[memo_props(hash = "craft-behavior's document arrangement: a fieldless enum")]
     arrangement: Option<craft::behavior::dock::Arrangement>,
@@ -174,6 +176,7 @@ impl<'a> MenuFacts<'a> {
                 view: &ui.view,
                 bars: (ui.panels.options_bar, ui.panels.status_bar, ui.panels.menu_bar, ui.panels.context_task_bar),
                 palette: ui.palette.open,
+                view360: app.session.active_index().is_some_and(|i| crate::canvas::view360::is_on(app, i)),
                 theme: (ui.theme.id().as_str(), ui.theme.is_dark()),
                 arrangement: ui.document_windows.arrangement,
                 ticks: window_ticks(app),

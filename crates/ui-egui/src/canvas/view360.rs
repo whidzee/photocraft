@@ -173,7 +173,7 @@ impl SphereView {
     }
 
     /// The camera as the user reads it: where it looks and how wide.
-    fn readout(&self) -> String {
+    pub(crate) fn readout(&self) -> String {
         let (yaw, pitch, fov) = (format!("{:.0}", self.yaw), format!("{:.0}", self.pitch), format!("{:.0}", self.fov));
         crate::i18n::fmt(tl!("Yaw {yaw}°, pitch {pitch}°, field of view {fov}°"), &[("yaw", &yaw), ("pitch", &pitch), ("fov", &fov)])
     }
@@ -1193,11 +1193,29 @@ pub(crate) fn outline(look: &SphereView, view: [f64; 2], size: [f64; 2], rect: R
 /// camera under it. A click or drag on the image looks at that spot; the wheel there changes the field of view.
 pub(crate) fn navigator(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize) {
     let ctx = ui.ctx().clone();
+    take_navigator_move(app, &ctx);
     let Some(size) = app.session.documents().get(idx).map(|st| st.doc.size) else { return };
     let Some(mut look) = app.ui.views.get(idx).and_then(|v| v.projection) else { return };
     let (iw, ih) = (f64::from(size.width.max(1)), f64::from(size.height.max(1)));
+    // The preview box fills the panel above the rows under it, as the flat Navigator's does, with the image fitted in
+    // its well. The rows' height is last pass's, as the box is laid out before them.
+    let rows_id = egui::Id::unique("pc-view360-navigator-rows");
+    let rows = ctx.data(|d| d.get_temp::<f32>(rows_id)).unwrap_or(0.0);
+    let (sunken, edge, inset) = StyleCx::with_root(&ctx, |cx| {
+        let c = &cx.tokens.color;
+        (cx.color(c.surface.sunken).egui(), cx.color(c.line.control_edge).egui(), cx.tokens.space.gap.inline)
+    });
     let width = ui.available_width().max(1.0);
-    let (rect, response) = ui.allocate_exact_size(vec2(width, (width as f64 * ih / iw) as f32), Sense::click_and_drag());
+    let fitted = ((width - 2.0 * inset).max(1.0) as f64 * ih / iw) as f32 + 2.0 * inset;
+    let room = ui.available_height() - rows - ui.spacing().item_spacing.y;
+    let (frame, response) = ui.allocate_exact_size(vec2(width, if room.is_finite() { room.max(fitted) } else { fitted }), Sense::click_and_drag());
+    ui.painter().rect(frame, 0.0, sunken, Stroke::new(1.0, edge), egui::StrokeKind::Inside);
+    let rect = {
+        let room = frame.shrink(inset).size().max(vec2(1.0, 1.0));
+        let scale = (room.x / iw as f32).min(room.y / ih as f32);
+        Rect::from_center_size(frame.center(), vec2(iw as f32 * scale, ih as f32 * scale))
+    };
+    let rows_top = frame.bottom();
     let colors = colors(&ctx);
     if let Some(params) = crate::canvas::navigator_gpu_view(app, idx, rect, &ctx) {
         crate::gpu_canvas::GpuCanvas::paint(ui.painter(), rect, params);
@@ -1284,11 +1302,38 @@ pub(crate) fn navigator(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize) 
     });
     ui.horizontal(|ui| camera_field(ui, fov_slot, fov_field));
     let [yaw, pitch, fov] = typed;
+    let rows_now = ui.min_rect().bottom() - rows_top;
+    if rows_now.is_finite() && (rows_now - rows).abs() > 0.5 {
+        ctx.data_mut(|d| d.insert_temp(rows_id, rows_now));
+        ctx.request_discard("the 360° View Navigator's rows changed height");
+    }
     look.yaw = yaw.unwrap_or(look.yaw);
     look.pitch = pitch.unwrap_or(look.pitch);
     look.fov = fov.unwrap_or(look.fov);
     if Some(look) != app.ui.views.get(idx).and_then(|v| v.projection) {
-        let _ = command(app, &json!({"on": true, "yaw": look.yaw, "pitch": look.pitch, "fov": look.fov}));
+        let p = json!({"on": true, "yaw": look.yaw, "pitch": look.pitch, "fov": look.fov});
+        let (frame, doc) = (ctx.cumulative_frame_nr(), app.session.active_index());
+        ctx.data_mut(|d| d.insert_temp(egui::Id::unique(NAVIGATOR_MOVE), (frame, doc, p)));
+        ctx.request_repaint();
+    }
+}
+
+/// Where the Navigator keeps the camera it was moved to until the next frame.
+const NAVIGATOR_MOVE: &str = "pc-view360-navigator-move";
+
+/// Applies the camera the Navigator was moved to in an earlier frame, through the view's command. The canvas and the
+/// Navigator each call it first, so the move lands between frames: the canvas draws before the Navigator in some frames
+/// and after it in others, and a camera changed in the middle of a frame would reach the canvas a frame late only some
+/// of the time, which jitters.
+pub(crate) fn take_navigator_move(app: &mut PhotocraftApp, ctx: &egui::Context) {
+    let id = egui::Id::unique(NAVIGATOR_MOVE);
+    let Some((frame, doc, p)) = ctx.data(|d| d.get_temp::<(u64, Option<usize>, Value)>(id)) else { return };
+    if frame >= ctx.cumulative_frame_nr() {
+        return;
+    }
+    ctx.data_mut(|d| d.remove::<(u64, Option<usize>, Value)>(id));
+    if doc == app.session.active_index() {
+        let _ = command(app, &p);
     }
 }
 

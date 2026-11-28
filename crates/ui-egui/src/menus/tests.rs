@@ -100,6 +100,12 @@ fn warp_box_open(app: &mut PhotocraftApp) {
     crate::transform_tool::begin_warp(app, &ctx).unwrap();
 }
 
+fn in_360(app: &mut PhotocraftApp) {
+    new_doc(app);
+    app.sync_views();
+    crate::canvas::view360::command(app, &json!({"on": true})).unwrap();
+}
+
 fn stored_warp(app: &mut PhotocraftApp) {
     painted_layer(app);
     app.run("layer.smartObjects.convertToSmartObject", json!({})).unwrap();
@@ -140,6 +146,8 @@ fn menu_rows_sit_where_photoshop_puts_them_and_show_their_state() {
             proofed,
             &[Want { id: "view.proofColors", checked: Some(true), ..Want::NONE }, Want { id: "view.gamutWarning", checked: Some(true), ..Want::NONE }],
         ),
+        ("flat view", new_doc, &[Want { id: "view.view360", checked: Some(false), ..Want::NONE }]),
+        ("360° View", in_360, &[Want { id: "view.view360", checked: Some(true), ..Want::NONE }]),
         ("Warp on a plain layer", painted_layer, &[Want { id: "edit.transform.warp", checked: Some(false), ..Want::NONE }]),
         ("Warp with its box open (#9798)", warp_box_open, &[Want { id: "edit.transform.warp", checked: Some(true), ..Want::NONE }]),
         ("Warp stored on a smart object (#9798)", stored_warp, &[Want { id: "edit.transform.warp", checked: Some(true), ..Want::NONE }]),

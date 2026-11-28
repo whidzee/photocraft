@@ -155,6 +155,9 @@ pub(super) fn checked(app: &PhotocraftApp, id: &str) -> Option<bool> {
     }
     // Check items stay check items with no document open (`Some(false)`, not `None`): a native
     // menu can't change an item's kind in place, so a change would rebuild the whole menu.
+    if id == "view.view360" {
+        return Some(app.session.active_index().is_some_and(|i| crate::canvas::view360::is_on(app, i)));
+    }
     if id == "select.isolateLayers" {
         return Some(app.session.active().is_some_and(|d| !d.isolated_layers.is_empty()));
     }

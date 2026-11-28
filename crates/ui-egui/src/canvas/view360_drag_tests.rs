@@ -199,3 +199,19 @@ fn the_toolbar_greys_out_tools_the_view_cannot_use() {
     assert!(greyed(&h, "Crop Tool"), "360: the Crop tool is greyed out");
     assert!(!greyed(&h, "Brush Tool") && h.query_all_by_label("Brush Tool").next().is_some(), "360: the Brush is not");
 }
+
+/// The 360° View Navigator's Zoom In and Zoom Out buttons work: with no flat canvas to answer them, they are still
+/// enabled and narrow or widen the field of view.
+#[test]
+fn the_navigator_zoom_buttons_change_the_field_of_view() {
+    use egui_kittest::kittest::Queryable as _;
+    let mut h = with_navigator(true);
+    let fov = look(&h).fov;
+    h.get_by_label("Zoom In").click();
+    h.run_steps(2);
+    let narrower = look(&h).fov;
+    assert!(narrower < fov, "{fov} → {narrower}");
+    h.get_by_label("Zoom Out").click();
+    h.run_steps(2);
+    assert!(look(&h).fov > narrower);
+}

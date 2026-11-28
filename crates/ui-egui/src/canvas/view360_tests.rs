@@ -636,3 +636,18 @@ fn looking_around_once_puts_the_look_note_away() {
     drag_with(&mut app, PointerButton::Middle, false, &[c, c + vec2(30.0, 0.0), c + vec2(60.0, 0.0)]);
     assert!(crate::dialogs::alerts::dismissed(&app, super::LOOK_HINT), "put away by a look around");
 }
+
+/// The Navigator's zoom row reads the camera as a zoom and turns a zoom back into the same camera: a narrower view
+/// reads as a closer zoom, and a zoom past either end stops at the field of view's limits.
+#[test]
+fn the_zoom_row_reads_and_sets_the_field_of_view() {
+    let (iw, h) = (4096.0, 800.0);
+    let wide = SphereView { fov: 120.0, ..SphereView::default() };
+    let narrow = SphereView { fov: 30.0, ..SphereView::default() };
+    assert!(narrow.zoom(iw, h) > wide.zoom(iw, h));
+    for l in [wide, narrow] {
+        let back = SphereView::fov_at_zoom(l.zoom(iw, h), iw, h);
+        assert!((back - l.fov).abs() < 1e-3, "{} → {back}", l.fov);
+    }
+    assert!(SphereView::fov_at_zoom(1e9, iw, h) <= narrow.fov && SphereView::fov_at_zoom(1e-9, iw, h) >= wide.fov);
+}

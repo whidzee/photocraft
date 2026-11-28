@@ -31,15 +31,17 @@
 //! The picture is the GPU canvas's `fs_proj` pass over the document's own tiles (`gpu_canvas`); the maths is
 //! `photocraft_engine::equirect`, shared with the engine.
 
+use craft::behavior::IconId;
 use craft::theme::Variant;
 use craft::theme::variant::{Emphasis, Tone};
+use craft::ui::buttons::IconButton;
 use craft::ui::canvas::{ViewCommands, ViewRequest};
 use craft::ui::contract::{Bind, Props as _, Show as _, ShowContainer as _};
 use craft::ui::display::{Badge, Text};
 use craft::ui::notices::{Notice, NoticeLayout};
 use craft::ui::style::StyleCx;
-use craft::ui::text::NumberField;
-use craft::ui::value_drag::Slider;
+use craft::ui::text::{NumberField, ZoomField};
+use craft::ui::value_drag::{Slider, SliderScale};
 use egui::{Color32, PointerButton, Pos2, Rect, Sense, Stroke, vec2};
 use photocraft_engine::brush_cmds::ProjectedPreview;
 use photocraft_engine::equirect::{Camera, MAX_FOV, MAX_PITCH, MIN_FOV, Rot, ViewProjection, rot, rotation_between, wrap_deg};
@@ -152,8 +154,22 @@ impl SphereView {
     /// The field of view that shows one image pixel of an `iw` wide latlong per device pixel at the centre of a view
     /// `h` device pixels tall.
     fn actual_pixels_fov(iw: f64, h: f64) -> f32 {
+        Self::fov_at_zoom(1.0, iw, h)
+    }
+
+    /// The field of view that shows `zoom` device pixels per image pixel (1 is 100%) at the centre of a view `h` device
+    /// pixels tall, on an `iw` wide latlong, within the view's limits.
+    fn fov_at_zoom(zoom: f64, iw: f64, h: f64) -> f32 {
         let per = std::f64::consts::TAU / iw.max(1.0);
-        (2.0 * (h.max(1.0) / 2.0 * per).atan()).to_degrees() as f32
+        let fov = (2.0 * (h.max(1.0) / 2.0 * per / zoom.max(f64::MIN_POSITIVE)).atan()).to_degrees();
+        fov.clamp(MIN_FOV, MAX_FOV) as f32
+    }
+
+    /// The zoom the camera shows at the centre of a view `h` device pixels tall: device pixels per image pixel of an
+    /// `iw` wide latlong, 1 being 100%, as the flat view's zoom reads.
+    fn zoom(&self, iw: f64, h: f64) -> f64 {
+        let half = (f64::from(self.fov).to_radians() / 2.0).tan().max(f64::MIN_POSITIVE);
+        h.max(1.0) / 2.0 / half * std::f64::consts::TAU / iw.max(1.0)
     }
 
     /// The camera as the user reads it: where it looks and how wide.
@@ -1216,37 +1232,76 @@ pub(crate) fn navigator(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize) 
     // The camera typed or slid, through the view's own command. Only a value the user edited this pass is taken:
     // the fields round what they show (yaw to a whole degree), so taking every pass's value would snap the camera
     // to the rounding while it is dragged, and jitter.
-    let mut fov = f64::from(look.fov);
+    // The flat Navigator's zoom row, as its percent field, Zoom Out, slider and Zoom In, reading the zoom at the centre
+    // of the view, so the panel keeps its layout and its percent across the switch. The slider spans the zooms the field
+    // of view allows, and the buttons step it as Zoom In and Zoom Out do.
+    let h = f64::from(canvas.height() * ppp);
+    let ppp = f64::from(ppp.max(f32::MIN_POSITIVE));
+    let document = craft::behavior::kurbo::Size::new(iw, ih);
+    let mut zoom = look.zoom(iw, h);
+    let (low, high) = (SphereView { fov: MAX_FOV as f32, ..look }.zoom(iw, h), SphereView { fov: MIN_FOV as f32, ..look }.zoom(iw, h));
+    let flat = super::document_display::active_view(app)
+        .map(|mut v| {
+            v.zoom = zoom / ppp;
+            v
+        })
+        .unwrap_or_else(|| craft::behavior::CanvasView::new(canvas, craft::behavior::kurbo::Point::new(iw / 2.0, ih / 2.0), zoom / ppp));
     let button = shows_button(app, idx);
-    let slid = craft::ui::layout_components::Row::new().show(ui, |ui, _| {
-        let slid = !Slider::new(Bind::bound(&mut fov), MIN_FOV..=MAX_FOV).step(0.5).label(tl!("Field of view")).show(ui).events.is_empty();
+    let percent = craft::ui::runtime::env::Env::of(ui).units().zoom_percent(zoom * 100.0);
+    let row = craft::ui::layout_components::Row::new().show(ui, |ui, _| {
+        let field = ZoomField::new(tl!("Zoom"), Some(flat), document).stepper(true).show(ui);
+        let typed = field.view.value().map(|v| v.zoom * ppp);
+        let out = IconButton::new(IconId::new("minus")).label(tl!("Zoom Out")).enabled(look.fov < MAX_FOV as f32).show(ui).clicked();
+        let slid =
+            !Slider::new(Bind::bound(&mut zoom), low..=high).scale(SliderScale::Log).label(tl!("Zoom")).value_text(percent.clone()).show(ui).events.is_empty();
+        let into = IconButton::new(IconId::new("plus")).label(tl!("Zoom In")).enabled(look.fov > MIN_FOV as f32).show(ui).clicked();
         if button {
             navigator_button(ui, true);
         }
-        slid
+        (typed.or(slid.then_some(zoom)), out, into, field.invalid_zoom)
     });
-    if slid.inner.unwrap_or(false) {
-        look.fov = fov as f32;
+    if let Some((typed, out, into, invalid)) = row.inner {
+        if let Some(z) = typed.filter(|z| z.is_finite()) {
+            look.fov = SphereView::fov_at_zoom(z, iw, h);
+        }
+        if out {
+            look.scale_fov(1.25);
+        }
+        if into {
+            look.scale_fov(1.0 / 1.25);
+        }
+        crate::panels::chrome_ui::zoom_alert(app, invalid);
     }
-    let fields: [(&str, f32, std::ops::RangeInclusive<f64>); 3] =
-        [(tl!("Yaw"), look.yaw, -180.0..=180.0), (tl!("Pitch"), look.pitch, -MAX_PITCH..=MAX_PITCH), (tl!("Field of view"), look.fov, MIN_FOV..=MAX_FOV)];
+    // Yaw and Pitch share a line, Field of view has its own.
     let mut typed = [None; 3];
-    for (slot, (name, value, range)) in typed.iter_mut().zip(fields) {
-        ui.horizontal(|ui| {
-            Text::new(name).show(ui);
-            let mut field = Some(f64::from(value));
-            let out = NumberField::new(name, Bind::bound(&mut field)).range(range).show(ui);
-            if !out.edit.events.is_empty() {
-                *slot = field.filter(|v| v.is_finite()).map(|v| v as f32);
-            }
-        });
-    }
+    let fields: [CameraField; 3] =
+        [(tl!("Yaw"), look.yaw, -180.0..=180.0), (tl!("Pitch"), look.pitch, -MAX_PITCH..=MAX_PITCH), (tl!("Field of view"), look.fov, MIN_FOV..=MAX_FOV)];
+    let [yaw_field, pitch_field, fov_field] = fields;
+    let [yaw_slot, pitch_slot, fov_slot] = &mut typed;
+    ui.horizontal(|ui| {
+        camera_field(ui, yaw_slot, yaw_field);
+        camera_field(ui, pitch_slot, pitch_field);
+    });
+    ui.horizontal(|ui| camera_field(ui, fov_slot, fov_field));
     let [yaw, pitch, fov] = typed;
     look.yaw = yaw.unwrap_or(look.yaw);
     look.pitch = pitch.unwrap_or(look.pitch);
     look.fov = fov.unwrap_or(look.fov);
     if Some(look) != app.ui.views.get(idx).and_then(|v| v.projection) {
         let _ = command(app, &json!({"on": true, "yaw": look.yaw, "pitch": look.pitch, "fov": look.fov}));
+    }
+}
+
+/// One of the Navigator's camera fields: its name, the value it shows and its range.
+type CameraField = (&'static str, f32, std::ops::RangeInclusive<f64>);
+
+/// A camera field after its name; `slot` takes the value the user typed this pass.
+fn camera_field(ui: &mut egui::Ui, slot: &mut Option<f32>, (name, value, range): CameraField) {
+    Text::new(name).show(ui);
+    let mut field = Some(f64::from(value));
+    let out = NumberField::new(name, Bind::bound(&mut field)).range(range).show(ui);
+    if !out.edit.events.is_empty() {
+        *slot = field.filter(|v| v.is_finite()).map(|v| v as f32);
     }
 }
 
